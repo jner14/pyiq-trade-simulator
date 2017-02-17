@@ -34,7 +34,7 @@ def get_final_signal(signals):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run strategy-demo which uses LiveTradeSimulator to interface iqfeed")
-    parser.add_argument('-t', action="store_true", dest='ticker', help="Ticker", default="@ESH17")
+    parser.add_argument('-t', action="store_true", dest='ticker', help="Ticker", default="@JY#")  # @ESH17
     parser.add_argument('-b', action="store_true", dest='backtest', help="Backtest Enabled: yes/no", default="n")
     pargs = parser.parse_args()
 
@@ -45,8 +45,8 @@ if __name__ == "__main__":
 
     sim.start()
     mySignals = {}
-    stop = 4 * .25  # tick count * tick value (e.g. $.25 is for s&p emini)
-    target = 4 * .25  # tick count * tick value
+    stop = 2 * .0000005  # tick count * tick value (e.g. $.25 is for s&p emini)
+    target = 2 * .0000005  # tick count * tick value
 
     while True:
         # Grab the most recent number of bars as necessary for signal generation

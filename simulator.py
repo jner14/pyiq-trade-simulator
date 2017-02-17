@@ -166,9 +166,9 @@ class Simulator(object):
             return to_send.values
 
     def update_minute_bars(self):
-        lgr.debug("Updating minute bars. len(updates)={}, len(minutes)={}".format(len(self.updates),
-                                                                                  len(self.minutes)))
+        lgr.debug("Updating minute bars. len(updates)={}, len(minutes)={}".format(len(self.updates), len(self.minutes)))
         # TODO: check for and clear out minutes during off-market hours
+        # TODO: fill missing minutes
         ts = datetime.now(TIMEZONE).replace(tzinfo=None)
         self.get_updates()
         if self.updates is None or len(self.updates) == 0:
@@ -251,7 +251,7 @@ class Simulator(object):
             dt = datetime.now(TIMEZONE).replace(tzinfo=None)
             sec = dt.second + dt.microsecond / 1e6
             to_wait = 60 - sec
-            lgr.info("Waiting {} seconds for next bar...".format(int(to_wait)))
+            lgr.info("Waiting {:.1f} seconds for next bar...".format(to_wait))
             time.sleep(to_wait)
 
     def buy(self, price):
@@ -273,7 +273,7 @@ class Simulator(object):
         self.save_trades()
 
     def wait_on_cover(self, target, stop, delay=0.1):
-        lgr.info("Waiting to exit short position at target={} ,stop={}".format(target, stop))
+        lgr.info("Waiting to exit short position at target={} ,stop={}".format(rnd(target), rnd(stop)))
         while True:
             if self.backtest:
                 # Get next bar()
@@ -296,16 +296,17 @@ class Simulator(object):
                             self.cover(row.Last)
                             return
 
-                    log_args = row.Last, target, stop, len(self.updates), self.queue.qsize()
+                    log_args = rnd(row.Last), rnd(target), rnd(stop), len(self.updates), self.queue.qsize()
                     lgr.info("Awaiting short exit: [price={}, target={}, stop={}, updates={}, qsize={}]".
                              format(*log_args))
+
                     self.update_minute_bars()
 
                 # Update minutes
                 time.sleep(delay)
 
     def wait_on_sell(self, target, stop, delay=0.1):
-        lgr.info("Waiting to exit long position at target={} ,stop={}".format(target, stop))
+        lgr.info("Waiting to exit long position at target={} ,stop={}".format(rnd(target), rnd(stop)))
         while True:
             if self.backtest:
                 # Get next bar()
@@ -328,7 +329,7 @@ class Simulator(object):
                             self.sell(row.Last)
                             return
 
-                    log_args = row.Last, target, stop, len(self.updates), self.queue.qsize()
+                    log_args = rnd(row.Last), rnd(target), rnd(stop), len(self.updates), self.queue.qsize()
                     lgr.info("Awaiting long exit: [price={}, target={}, stop={}, updates={}, qsize={}]".
                              format(*log_args))
                     self.update_minute_bars()
@@ -360,7 +361,7 @@ class Simulator(object):
             if not self.backtest:
                 # self.minutes.Datetime = self.minutes.Datetime.apply(lambda x: datetime.strftime(x, TIME_DATE_FORMAT))
                 self.minutes.to_csv("minute_bars.csv")
-                lgr.Debug("Saved minute data to minute_bars.csv")
+                lgr.debug("Saved minute data to minute_bars.csv")
         else:
             lgr.error("Failed to save minute data, value=None")
         # print("finished.")
@@ -493,6 +494,11 @@ def glimpse(df: DataFrame, size: int=5):
     elif len(df) <= size * 2:
         aGlimpse = df
     return aGlimpse
+
+
+def rnd(val, n: int=7):
+    return round(val, n)
+
 
 if __name__ == "__main__":
     # TODO: Consider implementing backtesting with trade data not just minute data
