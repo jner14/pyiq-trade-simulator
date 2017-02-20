@@ -1,15 +1,16 @@
 # coding=utf-8
 
 import iqfeed as iq
-import time
 import numpy as np
 import sys
 import logging
-from datetime import datetime, timedelta
+from time import sleep
 from pytz import timezone
+from datetime import datetime, timedelta, time
 from pandas import DataFrame, read_csv, Series, concat
 from localconfig import dtn_product_id, dtn_login, dtn_password
 from multiprocessing import Queue
+
 
 TIMEZONE = timezone('US/Eastern')
 TIME_DATE_FORMAT = '%Y-%m-%d %H:%M:%S.%f'
@@ -72,9 +73,8 @@ class HandyListener(iq.VerboseQuoteListener):
         data.loc[['Open', 'Close', 'High', 'Low']] = data.Last
 
         # Configure datetime
-        date = datetime.now(TIMEZONE).replace(tzinfo=None)
-        data.Datetime = date.replace(hour=0, minute=0, second=0, microsecond=0) + \
-                        timedelta(microseconds=int(data.Datetime))
+        date = datetime.now(TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+        data.Datetime = date + timedelta(microseconds=int(data.Datetime))
 
         # Add update data to debug output
         t1 = data.Datetime.strftime(TIME_DATE_FORMAT)
@@ -89,6 +89,8 @@ class HandyListener(iq.VerboseQuoteListener):
 
 class Simulator(object):
     FIELD_NAMES = ['Symbol', 'Last', 'Bid', 'Ask', 'Tick', 'Last Size', 'Last Time']
+    MARKET_OPEN = time(hour=8)
+    MARKET_CLOSE = time(hour=16)
 
     def __init__(self, ticker: str, backtest: bool=False, offline: bool=False):
         self.ticker = ticker
@@ -98,9 +100,10 @@ class Simulator(object):
         self.offline = offline
         self.watching = False
         self.queue = Queue()
+        self.marketHoursOnly = True
         self.trades = DataFrame(columns=['Price', 'Type'])
-        self.minutes = DataFrame(columns=['Open', 'High', 'Low', 'Close', 'UpVol', 'DownVol',
-                                          'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks'])
+        self.minute_bars = DataFrame(columns=['Open', 'High', 'Low', 'Close', 'UpVol', 'DownVol',
+                                              'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks'])
         self.updates = DataFrame(columns=UPDATES_LABELS)
         self.received_updates = False
         self.connector = None
@@ -115,7 +118,7 @@ class Simulator(object):
             Simulator.launch_service()
             self.download_missing()
             self.update_minute_bars()
-            # time.sleep(10)
+            # sleep(10)
             self.quote_conn = iq.QuoteConn(name="LiveTradeSimulator-trades_only")
             self.trade_listener = HandyListener("Trades Listener", self.queue, output_type)
             self.quote_conn.add_listener(self.trade_listener)
@@ -123,7 +126,7 @@ class Simulator(object):
         try:
             self.connector = iq.ConnConnector([self.quote_conn])
             self.quote_conn.connect()
-            # time.sleep(2)
+            # sleep(2)
         except Exception as e:
             if not self.offline:
                 lgr.critical("Failed to connect to with quote_conn!")
@@ -134,7 +137,7 @@ class Simulator(object):
         self.quote_conn.timestamp_off()
         self.quote_conn.trades_watch(self.ticker)
         self.watching = True
-        time.sleep(3)
+        sleep(3)
         return True
 
     def stop(self):
@@ -149,16 +152,22 @@ class Simulator(object):
         Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
         """
         lgr.debug("Getting minute bars. count={}".format(count))
-        if self.backtest and len(self.minutes) < count:
-            for _ in range(count - len(self.minutes)):
+        if self.backtest and len(self.minute_bars) < count:
+            for _ in range(count - len(self.minute_bars)):
                 self.wait_next_bar()
 
         if not self.offline:
             self.update_minute_bars()
+            ts = datetime.now(TIMEZONE).replace(tzinfo=None)
+            timeSLT = ts - self.minute_bars.index[-1] - timedelta(minutes=1)  # time since last bar closed
+            if timeSLT > timedelta(minutes=5):
+                lgr.warning("It has been {} day(s), {:.0f} hour(s), and {:.0f} minute(s) since the last close on record!".
+                            format(timeSLT.days, timeSLT.seconds / 3600, timeSLT.seconds % 3600 / 60))
+
         if as_dataframe:
-            return self.minutes.tail(count).copy()
+            return self.minute_bars.tail(count).copy()
         else:
-            to_send = self.minutes.tail(count).copy()
+            to_send = self.minute_bars.tail(count).copy()
             # to_send.insert(0, 'Time', [datetime.strftime(x, TIME_FORMAT) for x in to_send.index])
             # to_send.insert(0, 'Date', [datetime.strftime(x, DATE_FORMAT) for x in to_send.index])
             to_send.insert(0, 'Time', [x.time() for x in to_send.index])
@@ -166,19 +175,18 @@ class Simulator(object):
             return to_send.values
 
     def update_minute_bars(self):
-        lgr.debug("Updating minute bars. len(updates)={}, len(minutes)={}".format(len(self.updates), len(self.minutes)))
-        # TODO: check for and clear out minutes during off-market hours
-        # TODO: fill missing minutes
+        lgr.debug("Updating minute bars. len(updates)={}, len(minutes)={}".format(len(self.updates), 
+                                                                                  len(self.minute_bars)))
         ts = datetime.now(TIMEZONE).replace(tzinfo=None)
         self.get_updates()
         if self.updates is None or len(self.updates) == 0:
             lgr.debug("No longer updating minute bars because no new updates are available to create them")
             return
 
-        mask = None
-        if len(self.minutes) != 0:
+        minuteMask = None
+        if len(self.minute_bars) != 0:
             ltt = self.updates.iloc[-1].Datetime  # last trade time
-            startTime = (self.minutes.index[-1] + timedelta(minutes=1))
+            startTime = (self.minute_bars.index[-1] + timedelta(minutes=1))
             delta = ltt - startTime
             if delta < timedelta(minutes=1):
                 lgr.debug("Less than a minute({}s) has passed since {} until {}".format(delta, startTime, ltt))
@@ -186,8 +194,8 @@ class Simulator(object):
                 return
             end_time = ltt.replace(second=0, microsecond=0)
             lgr.debug("Filtering updates({}) by start={}, end={}".format(len(self.updates), startTime, end_time))
-            mask = (startTime < self.updates.Datetime) & (self.updates.Datetime < end_time)
-            toMinutes = self.updates.loc[mask, :]
+            minuteMask = (startTime < self.updates.Datetime) & (self.updates.Datetime < end_time)
+            toMinutes = self.updates.loc[minuteMask, :]
         else:
             # lgr.debug("No minute da")
             toMinutes = self.updates
@@ -209,20 +217,34 @@ class Simulator(object):
         resampled[rem_labels] = \
             toMinutes.loc[:, rem_labels + ['Datetime']].resample('T', on='Datetime').sum().loc[:, rem_labels]
 
+        # If there are minute bars, grab last one for filling empty bars
+        if len(self.minute_bars) != 0:
+            resampled = concat([self.minute_bars.tail(1), resampled])
+            self.minute_bars = self.minute_bars.iloc[:-1]
+
+        # Fill empty bars
         nanMask = resampled.Open.isnull()
-        resampled.loc[:, ['Open', 'Close', 'High', 'Low']] = resampled.loc[:, ['Open', 'Close', 'High', 'Low']].ffill()
+        resampled.loc[:, 'Close'] = resampled.loc[:, 'Close'].ffill()
         resampled.loc[nanMask, 'Open'] = resampled.loc[nanMask, 'Close']
         resampled.loc[nanMask, 'High'] = resampled.loc[nanMask, 'Close']
         resampled.loc[nanMask, 'Low'] = resampled.loc[nanMask, 'Close']
         resampled.fillna(0, inplace=True)
 
-        if mask is None:
+        # Remove minutes for non market hours
+        if self.marketHoursOnly:
+            lgr.debug("Filtering for market hours.")
+            hoursMask = ((Simulator.MARKET_OPEN < resampled.index.time) |
+                         (Simulator.MARKET_OPEN == resampled.index.time)) & (resampled.index.time < Simulator.MARKET_CLOSE)
+            finalMask = (resampled.index.dayofweek < 5) & hoursMask
+            resampled = resampled.loc[finalMask, :]
+
+        if minuteMask is None:
             self.updates = self.updates[[False] * len(self.updates)]
         else:
-            self.updates = self.updates[~mask]
+            self.updates = self.updates[~minuteMask]
         lgr.debug("Adding {} bars to minute data. updates={}\n{}".format(len(resampled),
                                                                          len(self.updates), glimpse(resampled)))
-        self.minutes = concat([self.minutes, resampled])
+        self.minute_bars = concat([self.minute_bars, resampled])
 
         if not self.offline:
             self.save_minute_data()
@@ -242,7 +264,7 @@ class Simulator(object):
         if self.backtest:
             # Grab next bar from self.bt_minutes and add to self.minutes
             if len(self.bt_minutes) != 0:
-                self.minutes = self.minutes.append(self.bt_minutes.iloc[0])
+                self.minute_bars = self.minute_bars.append(self.bt_minutes.iloc[0])
                 self.bt_minutes = self.bt_minutes.iloc[1:]
             else:
                 lgr.info("Finished backtesting!")
@@ -252,24 +274,24 @@ class Simulator(object):
             sec = dt.second + dt.microsecond / 1e6
             to_wait = 60 - sec
             lgr.info("Waiting {:.1f} seconds for next bar...".format(to_wait))
-            time.sleep(to_wait)
+            sleep(to_wait)
 
     def buy(self, price):
         if self.backtest:
-            dt = self.minutes.iloc[-1].name
+            dt = self.minute_bars.iloc[-1].name
         else:
             dt = datetime.now(TIMEZONE).replace(tzinfo=None)
-        self.trades.loc[dt] = [price, 'long-entry']
-        lgr.info("Long entry at {}".format(price))
+        self.trades.loc[dt] = [rnd(price), 'long-entry']
+        lgr.info("Long entry at {}".format(rnd(price)))
         self.save_trades()
 
     def cover(self, price):
         if self.backtest:
-            dt = self.minutes.iloc[-1].name
+            dt = self.minute_bars.iloc[-1].name
         else:
             dt = datetime.now(TIMEZONE).replace(tzinfo=None)
-        self.trades.loc[dt] = [price, 'short-exit']
-        lgr.info("Short exit at {}".format(price))
+        self.trades.loc[dt] = [rnd(price), 'short-exit']
+        lgr.info("Short exit at {}".format(rnd(price)))
         self.save_trades()
 
     def wait_on_cover(self, target, stop, delay=0.1):
@@ -280,7 +302,7 @@ class Simulator(object):
                 self.wait_next_bar()
 
                 # Check for target or stop
-                close = self.minutes.iloc[-1].Close
+                close = self.minute_bars.iloc[-1].Close
                 if target >= close or close >= stop:
                     self.cover(close)
                     return
@@ -303,7 +325,7 @@ class Simulator(object):
                     self.update_minute_bars()
 
                 # Update minutes
-                time.sleep(delay)
+                sleep(delay)
 
     def wait_on_sell(self, target, stop, delay=0.1):
         lgr.info("Waiting to exit long position at target={} ,stop={}".format(rnd(target), rnd(stop)))
@@ -313,7 +335,7 @@ class Simulator(object):
                 self.wait_next_bar()
 
                 # Check for target or stop
-                close = self.minutes.iloc[-1].Close
+                close = self.minute_bars.iloc[-1].Close
                 if stop >= close or close >= target:
                     self.sell(close)
                     return
@@ -335,32 +357,32 @@ class Simulator(object):
                     self.update_minute_bars()
 
                 # Update minutes
-                time.sleep(delay)
+                sleep(delay)
 
     def sell(self, price):
         if self.backtest:
-            dt = self.minutes.iloc[-1].name
+            dt = self.minute_bars.iloc[-1].name
         else:
             dt = datetime.now(TIMEZONE).replace(tzinfo=None)
-        self.trades.loc[dt] = [price, 'long-exit']
-        lgr.info("Long exit at {}".format(price))
+        self.trades.loc[dt] = [rnd(price), 'long-exit']
+        lgr.info("Long exit at {}".format(rnd(price)))
         self.save_trades()
 
     def short(self, price):
         if self.backtest:
-            dt = self.minutes.iloc[-1].name
+            dt = self.minute_bars.iloc[-1].name
         else:
             dt = datetime.now(TIMEZONE).replace(tzinfo=None)
-        self.trades.loc[dt] = [price, 'short-entry']
-        lgr.info("Short entry at {}".format(price))
+        self.trades.loc[dt] = [rnd(price), 'short-entry']
+        lgr.info("Short entry at {}".format(rnd(price)))
         self.save_trades()
 
     def save_minute_data(self):
         # print("minutes.csv[", end='')
-        if self.minutes is not None:
+        if self.minute_bars is not None:
             if not self.backtest:
                 # self.minutes.Datetime = self.minutes.Datetime.apply(lambda x: datetime.strftime(x, TIME_DATE_FORMAT))
-                self.minutes.to_csv("minute_bars.csv")
+                self.minute_bars.to_csv("minute_bars.csv")
                 lgr.debug("Saved minute data to minute_bars.csv")
         else:
             lgr.error("Failed to save minute data, value=None")
@@ -371,7 +393,7 @@ class Simulator(object):
             if self.backtest:
                 self.bt_minutes = read_csv("minute_bars.csv", index_col=0, parse_dates=True)
             else:
-                self.minutes = read_csv("minute_bars.csv", index_col=0, parse_dates=True)
+                self.minute_bars = read_csv("minute_bars.csv", index_col=0, parse_dates=True)
             lgr.info("Loaded minute_bars.csv")
         except Exception as e:
             lgr.error("Failed to load minute_bars.csv! {}] ".format(e.args))
@@ -397,10 +419,10 @@ class Simulator(object):
         if self.offline:
             lgr.info("Simulator is in offline mode...")
             return
-        if len(self.minutes) == 0:
+        if len(self.minute_bars) == 0:
             startTime = datetime.now(TIMEZONE).replace(tzinfo=None) - timedelta(days=max_days)
         else:
-            startTime = self.minutes.index[-1] + timedelta(seconds=60)
+            startTime = self.minute_bars.index[-1] + timedelta(seconds=60)
             # startTime = startTime.tz_localize(TIMEZONE)
 
         qsize = self.queue.qsize()
@@ -486,6 +508,11 @@ class Simulator(object):
         # server since IQFeed.exe runs under wine and always wants to create a GUI
         # window.
         # svc.launch(headless=True)
+
+    @staticmethod
+    def set_market_hours(start_hour: int=8, start_minute: int=0, end_hour: int=16, end_minute: int=0):
+        Simulator.MARKET_OPEN = time(hour=start_hour, minute=start_minute)
+        Simulator.MARKET_CLOSE = time(hour=end_hour, minute=end_minute)
 
 
 def glimpse(df: DataFrame, size: int=5):

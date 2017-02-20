@@ -33,16 +33,19 @@ def get_final_signal(signals):
 
 
 if __name__ == "__main__":
+    # Arg parsing allows passing parameters via the command line
     parser = argparse.ArgumentParser(description="Run strategy-demo which uses LiveTradeSimulator to interface iqfeed")
-    parser.add_argument('-t', action="store_true", dest='ticker', help="Ticker", default="@JY#")  # @ESH17
-    parser.add_argument('-b', action="store_true", dest='backtest', help="Backtest Enabled: yes/no", default="n")
+    parser.add_argument('-t', dest='ticker', help="Ticker", default="@JY#")  # @ESH17
+    parser.add_argument('-b', dest='backtest', help="Backtest Enabled: yes/no", default="n")
     pargs = parser.parse_args()
 
+    # Create simulator as live or backtesting
     if pargs.backtest.lower() in ['t', 'true', 'y', 'yes']:
         sim = Simulator(pargs.ticker, backtest=True, offline=True)
     else:
         sim = Simulator(pargs.ticker)
 
+    sim.marketHoursOnly = True  # Limit feed updates to market hours?
     sim.start()
     mySignals = {}
     stop = 2 * .0000005  # tick count * tick value (e.g. $.25 is for s&p emini)
