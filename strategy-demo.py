@@ -40,10 +40,11 @@ if __name__ == "__main__":
     pargs = parser.parse_args()
 
     # Create simulator as live or backtesting
+    daysBack = 5  # Days of historical data to download if minute_bars.csv is missing
     if pargs.backtest.lower() in ['t', 'true', 'y', 'yes']:
-        sim = Simulator(pargs.ticker, backtest=True, offline=True)
+        sim = Simulator(pargs.ticker, days_back=daysBack, backtest=True, offline=True)
     else:
-        sim = Simulator(pargs.ticker)
+        sim = Simulator(pargs.ticker, days_back=daysBack)
 
     sim.marketHoursOnly = True  # Limit feed updates to market hours?
     sim.start()

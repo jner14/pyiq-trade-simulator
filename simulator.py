@@ -92,8 +92,9 @@ class Simulator(object):
     MARKET_OPEN = time(hour=8)
     MARKET_CLOSE = time(hour=16)
 
-    def __init__(self, ticker: str, backtest: bool=False, offline: bool=False):
+    def __init__(self, ticker: str, days_back: int=1, backtest: bool=False, offline: bool=False):
         self.ticker = ticker
+        self.daysBack = days_back
         self.backtest = backtest
         self.backtest_period = 1
         self.bt_minutes = None
@@ -116,7 +117,7 @@ class Simulator(object):
     def start(self, output_type: str='queue'):
         if not self.offline:
             Simulator.launch_service()
-            self.download_missing()
+            self.download_missing(self.daysBack)
             self.update_minute_bars()
             # sleep(10)
             self.quote_conn = iq.QuoteConn(name="LiveTradeSimulator-trades_only")
