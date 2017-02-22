@@ -1,6 +1,7 @@
 from simulator import Simulator
 from random import random
 import argparse
+from time import sleep
 
 
 def get_signal_a(bars):
@@ -40,7 +41,7 @@ if __name__ == "__main__":
     pargs = parser.parse_args()
 
     # Create simulator as live or backtesting
-    daysBack = 5  # Days of historical data to download if minute_bars.csv is missing
+    daysBack = 1  # Days of historical data to download if minute_bars.csv is missing
     if pargs.backtest.lower() in ['t', 'true', 'y', 'yes']:
         sim = Simulator(pargs.ticker, days_back=daysBack, backtest=True, offline=True)
     else:
@@ -49,10 +50,15 @@ if __name__ == "__main__":
     sim.marketHoursOnly = True  # Limit feed updates to market hours?
     sim.start()
     mySignals = {}
-    stop = 2 * .0000005  # tick count * tick value (e.g. $.25 is for s&p emini)
+    stop = 2 * .0000005  # tick count * tick value (e.g. $.25 is for s&p emini) .0000005
     target = 2 * .0000005  # tick count * tick value
 
+    # Check if market hours have begun, wait if not. Default is 8AM - 4PM EST. Times are set using:
+    #     sim.set_market_hours(start_hour=int, start_minute=int, end_hour=int, end_minute=int)
+    sim.wait_market_hours()
+
     while True:
+
         # Grab the most recent number of bars as necessary for signal generation
         # bars = npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
         bars = sim.get_minute_bars(count=10)
@@ -65,11 +71,11 @@ if __name__ == "__main__":
 
         # Simulate order actions
         if finalSignal == 1:
-            sim.buy(last_close)
-            sim.wait_on_sell(last_close + target, last_close - stop)
+            sim.limit_buy(last_close)
+            sim.limit_sell(last_close + target, last_close - stop)
         elif finalSignal == -1:
-            sim.short(last_close)
-            sim.wait_on_cover(last_close - target, last_close + stop)
+            sim.limit_short(last_close)
+            sim.limit_cover(last_close - target, last_close + stop)
 
         # Wait for close of next bar
         sim.wait_next_bar()
