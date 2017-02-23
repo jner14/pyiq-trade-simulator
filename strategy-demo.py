@@ -1,7 +1,6 @@
 from simulator import Simulator
 from random import random
 import argparse
-from time import sleep
 
 
 def get_signal_a(bars):
@@ -50,11 +49,12 @@ if __name__ == "__main__":
     sim.marketHoursOnly = True  # Limit feed updates to market hours?
     sim.start()
     mySignals = {}
-    stop = 2 * .0000005  # tick count * tick value (e.g. $.25 is for s&p emini) .0000005
-    target = 2 * .0000005  # tick count * tick value
+    stop = 3 * .0000005  # tick count * tick value (e.g. $.25 is for s&p emini) .0000005
+    target = 3 * .0000005  # tick count * tick value
 
     # Check if market hours have begun, wait if not. Default is 8AM - 4PM EST. Times are set using:
     #     sim.set_market_hours(start_hour=int, start_minute=int, end_hour=int, end_minute=int)
+    sim.set_market_hours(start_hour=0, start_minute=30)
     sim.wait_market_hours()
 
     while True:

@@ -10,6 +10,11 @@ from datetime import datetime, timedelta, time
 from pandas import DataFrame, read_csv, Series, concat
 from localconfig import dtn_product_id, dtn_login, dtn_password
 from multiprocessing import Queue
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import matplotlib.ticker as mticker
+from matplotlib.finance import candlestick_ohlc
+from matplotlib import style as mplStyle
 
 
 TIMEZONE = timezone('US/Eastern')
@@ -20,6 +25,7 @@ LISTEN_LABELS = ['Symbol', 'Last', 'Bid', 'Ask', 'Tick', 'Size', 'Datetime', 'Op
                  'High', 'Low', 'UpTicks', 'DownTicks', 'TotalTicks', 'UpVol', 'DownVol', 'TotalVol']
 UPDATES_LABELS = ['Symbol', 'Last', 'Bid', 'Ask', 'Size', 'Datetime', 'Open', 'High', 'Low',
                   'Close', 'UpVol', 'DownVol', 'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks']
+mplStyle.use('dark_background')
 lgr = logging.getLogger('simulator')
 lgr.setLevel(logging.DEBUG)
 FORMATTER = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -114,6 +120,12 @@ class Simulator(object):
         lgr.info("Market hours are set to 8AM - 4PM EST")
         self.load_minute_data()
         self.load_trades()
+        self.max_bars = 120
+        self.bar_width = .0004
+        self.currentChartTime = None
+        self.fig = plt.figure()
+        self.ax1 = plt.subplot2grid((1, 1), (0, 0)) #
+        self.ax1.set_autoscaley_on(True)
 
     def start(self, output_type: str='queue'):
         if not self.offline:
@@ -199,13 +211,14 @@ class Simulator(object):
             minuteMask = (startTime < self.updates.Datetime) & (self.updates.Datetime < end_time)
             toMinutes = self.updates.loc[minuteMask, :].copy()
 
-            # Add last minute bar to beginning of updates so that when resampling no gaps are created
-            m = self.minute_bars.iloc[-1]
-            self.minute_bars = self.minute_bars.iloc[:-1]
-            toMinutes.loc[(toMinutes.index[-1] + 1), :] = [0] * 16
-            toMinutes = toMinutes.shift(1)
-            toMinutes.loc[toMinutes.iloc[0].name] = ['', m.name, m.Open, m.High, m.Low, m.Close, .0, 0, .0, .0, m.UpVol,
-                                                     m.DownVol, m.TotalVol, m.UpTicks, m.DownTicks, m.TotalTicks]
+            if len(toMinutes) > 0:
+                # Add last minute bar to beginning of updates so that when resampling no gaps are created
+                m = self.minute_bars.iloc[-1]
+                self.minute_bars = self.minute_bars.iloc[:-1]
+                toMinutes.loc[(toMinutes.index[-1] + 1), :] = [0] * 16
+                toMinutes = toMinutes.shift(1)
+                toMinutes.loc[toMinutes.iloc[0].name] = ['', m.name, m.Open, m.High, m.Low, m.Close, .0, 0, .0, .0, m.UpVol,
+                                                         m.DownVol, m.TotalVol, m.UpTicks, m.DownTicks, m.TotalTicks]
         else:
             # lgr.debug("No minute da")
             toMinutes = self.updates
@@ -275,6 +288,7 @@ class Simulator(object):
             for _ in range(update_count):
                 i = 0 if len(self.updates) == 0 else self.updates.iloc[-1].name
                 self.updates.loc[i + 1] = self.queue.get()
+            self.update_chart()
         else:
             self.received_updates = False
 
@@ -294,7 +308,15 @@ class Simulator(object):
             lgr.info("Waiting {:.1f} seconds for next bar. updates={}, qsize={}".format(to_wait,
                                                                                         len(self.updates),
                                                                                         self.queue.qsize()))
-            sleep(to_wait)
+            while to_wait > 0:
+                sleep(1)
+                self.update_minute_bars()
+                dt = datetime.now(TIMEZONE).replace(tzinfo=None)
+                sec = dt.second + dt.microsecond / 1e6
+                to_wait = 60 - sec
+                lgr.debug("Waiting {:.1f} seconds for next bar. updates={}, qsize={}".format(to_wait,
+                                                                                             len(self.updates),
+                                                                                             self.queue.qsize()))
 
     def buy(self, price):
         if self.backtest:
@@ -627,6 +649,49 @@ class Simulator(object):
                 lgr.info("Waiting on market hours to begin. {:.0f} hr(s), {:.0f} min(s), {:.1f} sec(s)".format(h, m, s))
                 firstTime = False
             sleep(1)
+
+    def update_chart(self):
+        self.ax1.clear()
+        # self.ax1.plot
+
+        ohlc = [(mdates.date2num(k), row.Open, row.High, row.Low, row.Close)
+                for k, row in self.minute_bars.iloc[-self.max_bars:].iterrows()]
+
+        if len(self.updates) > 0:
+            lastMinute = self.minute_bars.index[-1]
+            if self.currentChartTime is None or self.currentChartTime == lastMinute:
+                # self.currentMinute = lastMinute.name
+                self.currentChartTime = lastMinute + timedelta(minutes=1)
+                self.currentChartOpen = self.updates.iloc[0].Open
+                self.currentChartHigh = self.updates.High.max()
+                self.currentChartLow = self.updates.Low.min()
+                self.currentChartClose = self.updates.iloc[-1].Close
+            else:
+                self.currentChartHigh = self.updates.High.max()
+                self.currentChartLow = self.updates.Low.min()
+                self.currentChartClose = self.updates.iloc[-1].Close
+
+            ohlc.append((mdates.date2num(self.currentChartTime), self.currentChartOpen,
+                         self.currentChartHigh, self.currentChartLow, self.currentChartClose))
+            # print("updates={}, latest price:{}".format(len(self.updates), self.currentChartClose))
+
+        candlestick_ohlc(self.ax1, ohlc, width=self.bar_width, colorup='#77d879', colordown='#db3f3f')
+
+        for label in self.ax1.xaxis.get_ticklabels():
+            label.set_rotation(45)
+
+        self.ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:00'))
+        self.ax1.xaxis.set_major_locator(mticker.MaxNLocator(10))
+        self.ax1.grid(color='#232323', linestyle='dashed')
+        self.ax1.set_axisbelow(True)
+
+        plt.xlabel('Time')
+        plt.ylabel('Price')
+        plt.title(self.ticker)
+        plt.legend()
+        plt.subplots_adjust(left=0.16, bottom=0.20, right=0.94, top=0.90, wspace=0.2, hspace=0)
+        plt.draw()
+        plt.pause(1e-7)
 
 
 def glimpse(df: DataFrame, size: int=5):
