@@ -124,6 +124,8 @@ class Simulator(object):
         self.bar_width = .0004
         self.currentChartTime = None
         self.fig = plt.figure()
+        self.bar_color_up = '#4ed841'
+        self.bar_color_dn = '#d84141'
 
     def start(self, output_type: str='queue'):
         if not self.offline:
@@ -195,7 +197,7 @@ class Simulator(object):
             lgr.debug("No longer updating minute bars because no new updates are available to create them")
             return
 
-        minuteMask = None
+        updateMask = None
         if len(self.minute_bars) != 0:
             ltt = self.updates.iloc[-1].Datetime  # last trade time
             startTime = (self.minute_bars.index[-1] + timedelta(minutes=1))
@@ -206,8 +208,9 @@ class Simulator(object):
                 return
             end_time = ltt.replace(second=0, microsecond=0)
             lgr.debug("Filtering updates({}) by start={}, end={}".format(len(self.updates), startTime, end_time))
-            minuteMask = (startTime < self.updates.Datetime) & (self.updates.Datetime < end_time)
-            toMinutes = self.updates.loc[minuteMask, :].copy()
+            updateMask = (startTime < self.updates.Datetime) & (self.updates.Datetime < end_time)
+            assert updateMask.iloc[0], "Error: Updates are being filtered at start of list."
+            toMinutes = self.updates.loc[updateMask, :].copy()
 
             if len(toMinutes) > 0:
                 # Add last minute bar to beginning of updates so that when resampling no gaps are created
@@ -261,10 +264,10 @@ class Simulator(object):
         resampled.loc[nanMask2, 'Low'] = resampled.loc[nanMask2, 'Close']
         resampled.fillna(0, inplace=True)
 
-        if minuteMask is None:
+        if updateMask is None:
             self.updates = self.updates[[False] * len(self.updates)]
         else:
-            self.updates = self.updates[~minuteMask]
+            self.updates = self.updates[~updateMask]
         lgr.debug("Adding {} bars to minute data. updates={}\n{}".format(len(resampled),
                                                                          len(self.updates), glimpse(resampled)))
         self.minute_bars = concat([self.minute_bars, resampled])
@@ -642,54 +645,54 @@ class Simulator(object):
         if len(self.minute_bars) == 0:
             return
 
-        # self.ax1.clear()
+        ohlc = self.minute_bars.ix[-self.max_bars:, ['Open', 'High', 'Low', 'Close']]
+        ohlc.insert(0, 'Time', ohlc.index)
+        ohlc.Time = ohlc.Time.apply(lambda i: mdates.date2num(i))
 
-        ohlc = [(mdates.date2num(k), row.Open, row.High, row.Low, row.Close, row.TotalVol)
-                for k, row in self.minute_bars.iloc[-self.max_bars:].iterrows()]
+        volume = self.minute_bars.ix[-self.max_bars:, ['UpVol', 'DownVol']]
+        volume.insert(0, 'Time', ohlc.Time)
 
-        # self.ax1.plot(self.minute_bars[])
-
+        # If there are feed updates, create a partial minute bar to add to end of chart
         if len(self.updates) > 0:
+            # Use the time of the last recorded minute bar as a reference
             lastMinute = self.minute_bars.index[-1]
-            if self.currentChartTime is None or self.currentChartTime == lastMinute:
-                # self.currentMinute = lastMinute.name
+            # If this is the first run or the last minute bar has caught up to the partial minute bar
+            if self.currentChartTime is None or self.currentChartTime <= lastMinute:
+                # Create a new partial minute bar with the latest feed updates
                 self.currentChartTime = lastMinute + timedelta(minutes=1)
                 self.currentChartOpen = self.updates.iloc[0].Open
                 self.currentChartHigh = self.updates.High.max()
                 self.currentChartLow = self.updates.Low.min()
                 self.currentChartClose = self.updates.iloc[-1].Close
-                self.currentVolume = self.updates.TotalVol.sum()
+                self.currentUpVol = self.updates.UpVol.sum()
+                self.currentDownVol = self.updates.DownVol.sum()
+            # Otherwise, just update the current partial minute bar
             else:
                 self.currentChartHigh = self.updates.High.max()
                 self.currentChartLow = self.updates.Low.min()
                 self.currentChartClose = self.updates.iloc[-1].Close
-                self.currentVolume = self.updates.TotalVol.sum()
+                self.currentUpVol = self.updates.UpVol.sum()
+                self.currentDownVol = self.updates.DownVol.sum()
 
-            ohlc.append((mdates.date2num(self.currentChartTime), self.currentChartOpen,
-                         self.currentChartHigh, self.currentChartLow, self.currentChartClose, self.currentVolume))
-            # print("updates={}, latest price:{}".format(len(self.updates), self.currentChartClose))
+            ohlc.loc[self.currentChartTime] = [mdates.date2num(self.currentChartTime), self.currentChartOpen,
+                                               self.currentChartHigh, self.currentChartLow, self.currentChartClose]
+            volume.loc[self.currentChartTime] = [mdates.date2num(self.currentChartTime), self.currentUpVol,
+                                                 self.currentDownVol]
 
         self.ax1 = plt.subplot2grid((7, 1), (0, 0), rowspan=5, axisbg='#020007')
-        # candlestick_ohlc(self.ax1, ohlc, width=self.bar_width, colorup='#77d879', colordown='#db3f3f')
-        candlestick_ohlc(self.ax1, ohlc, width=self.bar_width, colorup='#77d879', colordown='#db3f3f')
-
-        # for label in self.ax1.xaxis.get_ticklabels():
-        #     label.set_rotation(45)
+        candlestick_ohlc(self.ax1, ohlc.values, width=self.bar_width,
+                         colorup=self.bar_color_up, colordown=self.bar_color_dn)
 
         self.ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:00'))
         self.ax1.xaxis.set_major_locator(mticker.MaxNLocator(10))
         self.ax1.grid(color='#232323', linestyle='dashed')
-        # self.ax1.set_axisbelow(True)
-
+        self.ax1.set_axisbelow(True)
         plt.ylabel('Price')
-        self.ax2 = plt.subplot2grid((7, 1), (5, 0), rowspan=2, axisbg='#020007', sharex=self.ax1)
-        date = [mdates.date2num(k) for k, row in self.minute_bars.iloc[-self.max_bars:].iterrows()]
-        vol = [row.TotalVol for k, row in self.minute_bars.iloc[-self.max_bars:].iterrows()]
-        if len(self.updates) > 0:
-            date.append(mdates.date2num(self.currentChartTime))
-            vol.append(self.currentVolume)
 
-        self.ax2.bar(date, vol, self.bar_width)
+        self.ax2 = plt.subplot2grid((7, 1), (5, 0), rowspan=2, axisbg='#020007', sharex=self.ax1)
+
+        self.ax2.bar(volume.Time.values, volume.UpVol.values, self.bar_width, color=self.bar_color_up)
+        self.ax2.bar(volume.Time.values, volume.DownVol.values, self.bar_width, color=self.bar_color_dn)
 
         for label in self.ax2.xaxis.get_ticklabels():
             label.set_rotation(45)
