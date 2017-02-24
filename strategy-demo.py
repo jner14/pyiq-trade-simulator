@@ -40,13 +40,19 @@ if __name__ == "__main__":
     pargs = parser.parse_args()
 
     # Create simulator as live or backtesting
-    daysBack = 5  # Days of historical data to download if minute_bars.csv is missing
+    daysBack = 1  # Days of historical data to download if minute_bars.csv is missing
     if pargs.backtest.lower() in ['t', 'true', 'y', 'yes']:
         sim = Simulator(pargs.ticker, days_back=daysBack, backtest=True, offline=True)
     else:
         sim = Simulator(pargs.ticker, days_back=daysBack)
 
-    sim.marketHoursOnly = True  # Limit feed updates to market hours?
+    # Examples of chart adjustments
+    # sim.bar_up_color = '#66f4f2'  # Use color picker online, e.g. http://www.colorpicker.com/
+    # sim.bar_down_color = '#7541d8'
+    # sim.max_bars = 120
+    # sim.bar_width = .0004
+
+    sim.market_hours_only = False  # Limit feed updates to market hours?
     sim.start()
     mySignals = {}
     stop = 2 * .0000005  # tick count * tick value (e.g. $.25 is for s&p emini) .0000005
