@@ -40,7 +40,7 @@ if __name__ == "__main__":
     pargs = parser.parse_args()
 
     # Create simulator as live or backtesting
-    daysBack = 1  # Days of historical data to download if minute_bars.csv is missing
+    daysBack = 5  # Days of historical data to download if minute_bars.csv is missing
     if pargs.backtest.lower() in ['t', 'true', 'y', 'yes']:
         sim = Simulator(pargs.ticker, days_back=daysBack, backtest=True, offline=True)
     else:
@@ -49,12 +49,11 @@ if __name__ == "__main__":
     sim.marketHoursOnly = True  # Limit feed updates to market hours?
     sim.start()
     mySignals = {}
-    stop = 3 * .0000005  # tick count * tick value (e.g. $.25 is for s&p emini) .0000005
-    target = 3 * .0000005  # tick count * tick value
+    stop = 2 * .0000005  # tick count * tick value (e.g. $.25 is for s&p emini) .0000005
+    target = 2 * .0000005  # tick count * tick value
 
     # Check if market hours have begun, wait if not. Default is 8AM - 4PM EST. Times are set using:
     #     sim.set_market_hours(start_hour=int, start_minute=int, end_hour=int, end_minute=int)
-    sim.set_market_hours(start_hour=0, start_minute=30)
     sim.wait_market_hours()
 
     while True:

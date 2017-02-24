@@ -124,8 +124,6 @@ class Simulator(object):
         self.bar_width = .0004
         self.currentChartTime = None
         self.fig = plt.figure()
-        self.ax1 = plt.subplot2grid((1, 1), (0, 0)) #
-        self.ax1.set_autoscaley_on(True)
 
     def start(self, output_type: str='queue'):
         if not self.offline:
@@ -241,25 +239,19 @@ class Simulator(object):
         resampled[rem_labels] = \
             toMinutes.loc[:, rem_labels + ['Datetime']].resample('T', on='Datetime').sum().loc[:, rem_labels]
 
-        # Remove minutes for non market hours
-        if self.marketHoursOnly:
-            lgr.debug("Filtering for market hours.")
-            # Resample minute bars to 15 minutes
-            min15 = resampled.resample('15T').first()
-            # Create mask where rows are not null and not equal to zero
-            nanMask1 = ~(min15.Open.isnull()) & (min15.TotalVol != 0)
-            # Append a row to mask that matches last minute bar of resampled in prep for upsampling
-            nanMask1.loc[resampled.index[-1]] = nanMask1.iloc[-1]
-            # Upsample the mask to minutes and fill values forward
-            nanMask1 = nanMask1.resample('T').ffill()
-            # Filter mask to only include rows in resampled
-            nanMask1 = nanMask1.loc[resampled.index[0]:, ]
-            # Filter minute bars by mask, keeping only those that have activity within fifteen minute time span
-            resampled = resampled[nanMask1]
-            # hoursMask = ((Simulator.MARKET_OPEN < resampled.index.time) |
-            #              (Simulator.MARKET_OPEN == resampled.index.time)) & (resampled.index.time < Simulator.MARKET_CLOSE)
-            # finalMask = (resampled.index.dayofweek < 5) & hoursMask
-            # resampled = resampled.loc[finalMask, :]
+        lgr.debug("Filtering for trade halts and zero volume for over 15 minutes.")
+        # Resample minute bars to 15 minutes
+        min15 = resampled.resample('15T').first()
+        # Create mask where rows are not null and not equal to zero
+        nanMask1 = ~(min15.Open.isnull()) & (min15.TotalVol != 0)
+        # Append a row to mask that matches last minute bar of resampled in prep for upsampling
+        nanMask1.loc[resampled.index[-1]] = nanMask1.iloc[-1]
+        # Upsample the mask to minutes and fill values forward
+        nanMask1 = nanMask1.resample('T').ffill()
+        # Filter mask to only include rows in resampled
+        nanMask1 = nanMask1.loc[resampled.index[0]:, ]
+        # Filter minute bars by mask, keeping only those that have activity within fifteen minute time span
+        resampled = resampled[nanMask1]
 
         # Fill empty bars
         nanMask2 = resampled.Open.isnull()
@@ -302,21 +294,17 @@ class Simulator(object):
                 lgr.info("Finished backtesting!")
                 sys.exit()
         else:
-            dt = datetime.now(TIMEZONE).replace(tzinfo=None)
-            sec = dt.second + dt.microsecond / 1e6
-            to_wait = 60 - sec
-            lgr.info("Waiting {:.1f} seconds for next bar. updates={}, qsize={}".format(to_wait,
-                                                                                        len(self.updates),
-                                                                                        self.queue.qsize()))
-            while to_wait > 0:
-                sleep(1)
+            lastBarTime = self.minute_bars.index[-1]
+            endTime = lastBarTime + timedelta(minutes=2)
+            while lastBarTime == self.minute_bars.index[-1]:
+                sleep(.1)
                 self.update_minute_bars()
-                dt = datetime.now(TIMEZONE).replace(tzinfo=None)
-                sec = dt.second + dt.microsecond / 1e6
-                to_wait = 60 - sec
-                lgr.debug("Waiting {:.1f} seconds for next bar. updates={}, qsize={}".format(to_wait,
-                                                                                             len(self.updates),
-                                                                                             self.queue.qsize()))
+                if datetime.now().second % 5 == 0 and int(datetime.now().microsecond / 1e5) == 0:
+                    currTime = datetime.now(TIMEZONE).replace(tzinfo=None)
+                    to_wait = (endTime - currTime).total_seconds()
+                    lgr.info("Waiting {} seconds for next bar. updates={}, qsize={}".format(round(to_wait),
+                                                                                                len(self.updates),
+                                                                                                self.queue.qsize()))
 
     def buy(self, price):
         if self.backtest:
@@ -651,11 +639,15 @@ class Simulator(object):
             sleep(1)
 
     def update_chart(self):
-        self.ax1.clear()
-        # self.ax1.plot
+        if len(self.minute_bars) == 0:
+            return
 
-        ohlc = [(mdates.date2num(k), row.Open, row.High, row.Low, row.Close)
+        # self.ax1.clear()
+
+        ohlc = [(mdates.date2num(k), row.Open, row.High, row.Low, row.Close, row.TotalVol)
                 for k, row in self.minute_bars.iloc[-self.max_bars:].iterrows()]
+
+        # self.ax1.plot(self.minute_bars[])
 
         if len(self.updates) > 0:
             lastMinute = self.minute_bars.index[-1]
@@ -666,29 +658,46 @@ class Simulator(object):
                 self.currentChartHigh = self.updates.High.max()
                 self.currentChartLow = self.updates.Low.min()
                 self.currentChartClose = self.updates.iloc[-1].Close
+                self.currentVolume = self.updates.TotalVol.sum()
             else:
                 self.currentChartHigh = self.updates.High.max()
                 self.currentChartLow = self.updates.Low.min()
                 self.currentChartClose = self.updates.iloc[-1].Close
+                self.currentVolume = self.updates.TotalVol.sum()
 
             ohlc.append((mdates.date2num(self.currentChartTime), self.currentChartOpen,
-                         self.currentChartHigh, self.currentChartLow, self.currentChartClose))
+                         self.currentChartHigh, self.currentChartLow, self.currentChartClose, self.currentVolume))
             # print("updates={}, latest price:{}".format(len(self.updates), self.currentChartClose))
 
+        self.ax1 = plt.subplot2grid((7, 1), (0, 0), rowspan=5, axisbg='#020007')
+        # candlestick_ohlc(self.ax1, ohlc, width=self.bar_width, colorup='#77d879', colordown='#db3f3f')
         candlestick_ohlc(self.ax1, ohlc, width=self.bar_width, colorup='#77d879', colordown='#db3f3f')
 
-        for label in self.ax1.xaxis.get_ticklabels():
-            label.set_rotation(45)
+        # for label in self.ax1.xaxis.get_ticklabels():
+        #     label.set_rotation(45)
 
         self.ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:00'))
         self.ax1.xaxis.set_major_locator(mticker.MaxNLocator(10))
         self.ax1.grid(color='#232323', linestyle='dashed')
-        self.ax1.set_axisbelow(True)
+        # self.ax1.set_axisbelow(True)
+
+        plt.ylabel('Price')
+        self.ax2 = plt.subplot2grid((7, 1), (5, 0), rowspan=2, axisbg='#020007', sharex=self.ax1)
+        date = [mdates.date2num(k) for k, row in self.minute_bars.iloc[-self.max_bars:].iterrows()]
+        vol = [row.TotalVol for k, row in self.minute_bars.iloc[-self.max_bars:].iterrows()]
+        if len(self.updates) > 0:
+            date.append(mdates.date2num(self.currentChartTime))
+            vol.append(self.currentVolume)
+
+        self.ax2.bar(date, vol, self.bar_width)
+
+        for label in self.ax2.xaxis.get_ticklabels():
+            label.set_rotation(45)
 
         plt.xlabel('Time')
-        plt.ylabel('Price')
-        plt.title(self.ticker)
-        plt.legend()
+        plt.ylabel('Volume')
+        plt.suptitle(self.ticker)
+        plt.setp(self.ax1.get_xticklabels(), visible=False)
         plt.subplots_adjust(left=0.16, bottom=0.20, right=0.94, top=0.90, wspace=0.2, hspace=0)
         plt.draw()
         plt.pause(1e-7)
@@ -710,9 +719,8 @@ def rnd(val, n: int=7):
 if __name__ == "__main__":
     # TODO: Consider implementing backtesting with trade data not just minute data
     # For debugging code
-    # sim1 = Simulator("@ESH17")
-    # sim1.launch_service()
-    # # tick_data = sim1.get_ticks_for_period(datetime(2017, 2, 16, 15, 50), datetime(2017, 2, 16, 16, 2))
-    # tick_data = sim1.get_ticks_for_period(datetime(2017, 2, 16, 15, 50), datetime.now(TIMEZONE).replace(tzinfo=None))
-    # tick_data.to_csv("simulator-temp-data.csv")
+    sim1 = Simulator("@JY#")
+    while True:
+        sim1.update_chart()
+        plt.pause(1)
     pass
