@@ -55,6 +55,7 @@ if __name__ == "__main__":
     # sim.bar_width = .0004
 
     sim.market_hours_only = False  # Limit feed updates to market hours?
+    # sim.charting_enabled = False  # Use this to disable charting
     sim.start()
     mySignals = {}
     stop = 3 * .0000005  # tick count * tick value (e.g. $.25 is for s&p emini) .0000005
@@ -92,7 +93,7 @@ if __name__ == "__main__":
             if filled:
                 sim.limit_cover(last_close - target, last_close + stop)
 
-        # Wait for close of next bar
+        # Wait for close of bar
         sim.wait_next_bar()
 
 

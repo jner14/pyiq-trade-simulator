@@ -131,6 +131,7 @@ class Simulator(object):
         self._in_trade = False
         self._stop_price = 0.0
         self._target_price = 0.0
+        self.charting_enabled = True
 
     def start(self, output_type: str='queue'):
         if not self.offline:
@@ -171,9 +172,12 @@ class Simulator(object):
         Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
         """
         lgr.debug("Getting minute bars. count={}".format(count))
-        if self.backtest and len(self._minute_bars) < count:
-            for _ in range(count - len(self._minute_bars)):
-                self.wait_next_bar()
+        if self.backtest:
+            if self.charting_enabled:
+                self._update_chart()
+            if len(self._minute_bars) < count:
+                for _ in range(count - len(self._minute_bars)):
+                    self.wait_next_bar()
 
         if not self.offline:
             self._update_minute_bars()
@@ -288,7 +292,8 @@ class Simulator(object):
             for _ in range(update_count):
                 i = 0 if len(self._updates) == 0 else self._updates.iloc[-1].name
                 self._updates.loc[i + 1] = self._queue.get()
-            self._update_chart()
+            if self.charting_enabled:
+                self._update_chart()
         else:
             self._received_updates = False
 
@@ -741,8 +746,8 @@ class Simulator(object):
         candlestick_ohlc(self.ax1, ohlc.values, width=self.bar_width,
                          colorup=self.bar_up_color, colordown=self.bar_down_color)
 
+        bbox_props = dict(boxstyle="round", fc="black", ec="black", alpha=0.8, pad=.1)
         if self._in_trade:
-            bbox_props = dict(boxstyle="round", fc="black", ec="black", alpha=0.8, pad=.1)
             self.ax1.plot([ohlc.ix[-50, 'Time'], ohlc.ix[-1, 'Time']], [self._stop_price, self._stop_price],
                           color=self.stop_color, linewidth=1)
             self.ax1.text(ohlc.ix[-50, 'Time'], self._stop_price, 'Stop={}'.format(self._stop_price), ha="left",
@@ -752,6 +757,15 @@ class Simulator(object):
                           color=self.target_color, linewidth=1)
             self.ax1.text(ohlc.ix[-50, 'Time'], self._target_price, 'Target={}'.format(self._target_price), ha="left",
                           va="bottom", bbox=bbox_props, color=self.target_color, size=8)
+
+        # Draw trade's entry and exit indicators
+        trades = self.trades.loc[((self.trades.index > ohlc.index[0]) & (self.trades.index < ohlc.index[-1]))]
+        for k, row in trades.iterrows():
+            xy = (k, row.Price)
+            color = 'red' if row.Type in ['long-exit', 'short-exit'] else 'green'
+            xytext = (0, -40) if row.Type in ['long-entry', 'short-exit'] else (0, 40)
+            self.ax1.annotate(row.Type, xy=xy, arrowprops=dict(fc=color, ec=color, alpha=.8, width=2, headwidth=5),
+                              size=6, bbox=bbox_props, textcoords='offset pixels', xytext=xytext)
 
         self.ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
         self.ax1.xaxis.set_major_locator(mticker.MaxNLocator(10))
