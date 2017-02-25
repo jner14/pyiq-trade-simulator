@@ -103,7 +103,7 @@ class Simulator(object):
         self.daysBack = days_back
         self.backtest = backtest
         self.backtest_period = 1
-        self.bt_minutes = None
+        self._bt_minutes = None
         self.offline = offline
         self._watching = False
         self._queue = Queue()
@@ -295,9 +295,9 @@ class Simulator(object):
     def wait_next_bar(self):
         if self.backtest:
             # Grab next bar from self.bt_minutes and add to self.minutes
-            if len(self.bt_minutes) != 0:
-                self._minute_bars = self._minute_bars.append(self.bt_minutes.iloc[0])
-                self.bt_minutes = self.bt_minutes.iloc[1:]
+            if len(self._bt_minutes) != 0:
+                self._minute_bars = self._minute_bars.append(self._bt_minutes.iloc[0])
+                self._bt_minutes = self._bt_minutes.iloc[1:]
             else:
                 lgr.info("Finished backtesting!")
                 sys.exit()
@@ -327,18 +327,23 @@ class Simulator(object):
         self.save_trades()
         self._in_trade = True
 
-    def limit_buy(self, price, delay=0.1):
+    def limit_buy(self, price, delay=0.1, timeout=5):
         lgr.info("Waiting to enter long position at price={}".format(rnd(price)))
-        while True:
+        startTime = self._minute_bars.index[-1] if self.backtest else datetime.now()
+        filled = False
+        while not filled:
+
             if self.backtest:
-                # Get next bar()
                 self.wait_next_bar()
 
                 # Check for target price
                 close = self._minute_bars.iloc[-1].Close
                 if price >= close:
                     self._buy(close)
-                    return
+                    filled = True
+                    break
+                elapsedTime = self._minute_bars.index[-1] - startTime
+
             else:
                 # Get updates
                 self._get_updates()
@@ -349,16 +354,31 @@ class Simulator(object):
                     for k, row in self._updates.iterrows():
                         if price >= row.Last:
                             self._buy(row.Last)
-                            return
+                            filled = True
+                            break
 
                     log_args = rnd(row.Last), rnd(price), len(self._updates), self._queue.qsize()
+                    self._update_minute_bars()
+
+                    if filled:
+                        break
+
                     lgr.info("Awaiting long entry: [current price={}, target={}, updates={}, qsize={}]".
                              format(*log_args))
 
-                    self._update_minute_bars()
-
                 # Update minutes
                 sleep(delay)
+                elapsedTime = datetime.now() - startTime
+
+            # Check if limit order has timed out due to being unfilled
+            if elapsedTime >= timedelta(minutes=timeout):
+                lgr.info("Limit long order timed out after {} minute(s).".format(timeout))
+                break
+
+        if filled:
+            return True
+        else:
+            return False
 
     def _cover(self, price):
         if self.backtest:
@@ -459,18 +479,22 @@ class Simulator(object):
         self.save_trades()
         self._in_trade = True
 
-    def limit_short(self, price, delay=0.1):
+    def limit_short(self, price, delay=0.1, timeout=5):
         lgr.info("Waiting to enter short position at price={}".format(rnd(price)))
-        while True:
+        startTime = self._minute_bars.index[-1] if self.backtest else datetime.now()
+        filled = False
+        while not filled:
             if self.backtest:
-                # Get next bar()
                 self.wait_next_bar()
 
                 # Check for target price
                 close = self._minute_bars.iloc[-1].Close
                 if price <= close:
                     self._short(close)
-                    return
+                    filled = True
+                    break
+                elapsedTime = self._minute_bars.index[-1] - startTime
+
             else:
                 # Get updates
                 self._get_updates()
@@ -481,9 +505,15 @@ class Simulator(object):
                     for k, row in self._updates.iterrows():
                         if price <= row.Last:
                             self._short(row.Last)
-                            return
+                            filled = True
+                            break
 
                     log_args = rnd(row.Last), rnd(price), len(self._updates), self._queue.qsize()
+                    self._update_minute_bars()
+
+                    if filled:
+                        break
+
                     lgr.info("Awaiting short entry: [current price={}, target={}, updates={}, qsize={}]".
                              format(*log_args))
 
@@ -491,6 +521,17 @@ class Simulator(object):
 
                 # Update minutes
                 sleep(delay)
+                elapsedTime = datetime.now() - startTime
+
+            # Check if limit order has timed out due to being unfilled
+            if elapsedTime >= timedelta(minutes=timeout):
+                lgr.info("Limit short order timed out after {} minute(s).".format(timeout))
+                break
+
+        if filled:
+            return True
+        else:
+            return False
 
     def save_minute_data(self):
         # print("minutes.csv[", end='')
@@ -506,7 +547,7 @@ class Simulator(object):
     def load_minute_data(self):
         try:
             if self.backtest:
-                self.bt_minutes = read_csv("minute_bars.csv", index_col=0, parse_dates=True)
+                self._bt_minutes = read_csv("minute_bars.csv", index_col=0, parse_dates=True)
             else:
                 self._minute_bars = read_csv("minute_bars.csv", index_col=0, parse_dates=True)
             lgr.info("Loaded minute_bars.csv")
