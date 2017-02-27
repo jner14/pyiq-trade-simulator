@@ -15,6 +15,8 @@ import matplotlib.dates as mdates
 import matplotlib.ticker as mticker
 from matplotlib.finance import candlestick_ohlc
 from matplotlib import style as mplStyle
+from matplotlib.lines import Line2D
+from matplotlib.patches import Rectangle
 
 
 TIMEZONE = timezone('US/Eastern')
@@ -707,7 +709,7 @@ class Simulator(object):
     def _update_chart(self):
         if len(self._minute_bars) == 0:
             return
-
+        st = datetime.now()
         ohlc = self._minute_bars.ix[-self.max_bars:, ['Open', 'High', 'Low', 'Close']]
         ohlc.insert(0, 'Time', ohlc.index)
         ohlc.Time = ohlc.Time.apply(lambda i: mdates.date2num(i))
@@ -746,6 +748,7 @@ class Simulator(object):
         candlestick_ohlc(self.ax1, ohlc.values, width=self.bar_width,
                          colorup=self.bar_up_color, colordown=self.bar_down_color)
 
+        # Draw target and stop indicators when in a trade
         bbox_props = dict(boxstyle="round", fc="black", ec="black", alpha=0.8, pad=.1)
         if self._in_trade:
             self.ax1.plot([ohlc.ix[-50, 'Time'], ohlc.ix[-1, 'Time']], [self._stop_price, self._stop_price],
@@ -758,14 +761,15 @@ class Simulator(object):
             self.ax1.text(ohlc.ix[-50, 'Time'], self._target_price, 'Target={}'.format(self._target_price), ha="left",
                           va="bottom", bbox=bbox_props, color=self.target_color, size=8)
 
-        # Draw trade's entry and exit indicators
+        # Draw trade entry and exit indicators
         trades = self.trades.loc[((self.trades.index > ohlc.index[0]) & (self.trades.index < ohlc.index[-1]))]
         for k, row in trades.iterrows():
             xy = (k, row.Price)
-            color = 'red' if row.Type in ['long-exit', 'short-exit'] else 'green'
-            xytext = (0, -40) if row.Type in ['long-entry', 'short-exit'] else (0, 40)
-            self.ax1.annotate(row.Type, xy=xy, arrowprops=dict(fc=color, ec=color, alpha=.8, width=2, headwidth=5),
-                              size=6, bbox=bbox_props, textcoords='offset pixels', xytext=xytext)
+            color, marker = ('red', 'v') if row.Type in ['short-entry'] else ('green', '^')
+            if row.Type in ['long-exit', 'short-exit']:
+                self.ax1.plot(k, row.Price, marker='*', markerfacecolor='white', markersize=7, color='white')
+            else:
+                self.ax1.plot(k, row.Price, marker=marker, markerfacecolor=color, markersize=7, color=color)
 
         self.ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
         self.ax1.xaxis.set_major_locator(mticker.MaxNLocator(10))
@@ -783,8 +787,94 @@ class Simulator(object):
         plt.suptitle(self.ticker)
         plt.setp(self.ax1.get_xticklabels(), visible=False)
         plt.subplots_adjust(left=0.16, bottom=0.20, right=0.94, top=0.90, wspace=0.2, hspace=0)
-        plt.draw()
         plt.pause(1e-7)
+        print(datetime.now() - st)
+
+    def _candlestick(self, ax, quotes, width=0.2, colorup='k', colordown='r', alpha=1.0):
+
+        """
+        Adapted from matplotlib finance module.
+        Plot the time, open, high, low, close as a vertical line ranging
+        from low to high.  Use a rectangular bar to represent the
+        open-close span.  If close >= open, use colorup to color the bar,
+        otherwise use colordown
+
+        Parameters
+        ----------
+        ax : `Axes`
+            an Axes instance to plot to
+        quotes : sequence of quote sequences
+            data to plot.  time must be in float date format - see date2num
+            (time, open, high, low, close, ...) vs
+            (time, open, close, high, low, ...)
+            set by `ochl`
+        width : float
+            fraction of a day for the rectangle width
+        colorup : color
+            the color of the rectangle where close >= open
+        colordown : color
+             the color of the rectangle where close <  open
+        alpha : float
+            the rectangle alpha level
+
+        Returns
+        -------
+        ret : tuple
+            returns (lines, patches) where lines is a list of lines
+            added and patches is a list of the rectangle patches added
+
+        """
+        # global lines, patches
+
+        OFFSET = width / 2.0
+
+        # lines = []
+        # patches = []
+        # print(len(quotes))
+        for q in quotes:
+            t, open, high, low, close = q[:5]
+
+            if close >= open:
+                color = colorup
+                lower = open
+                height = close - open
+            else:
+                color = colordown
+                lower = close
+                height = open - close
+
+            vLine = Line2D(
+                xdata=(t, t), ydata=(low, high),
+                color=color,
+                linewidth=0.5,
+                antialiased=True,
+            )
+
+            rect = Rectangle(
+                xy=(t - OFFSET, lower),
+                width=width,
+                height=height,
+                facecolor=color,
+                edgecolor=color,
+            )
+            rect.set_alpha(alpha)
+
+            # lines.append(vLine)
+            # patches.append(rect)
+            ax.add_line(vLine)
+            ax.add_patch(rect)
+
+        # lastTime = datetime.now()
+        # lines = lines[-self.max_bars:]
+        # print("len patches={}".format(len(patches)))
+        ax.lines = ax.lines[-self.max_bars:]
+        # patches = patches[-self.max_bars:]
+        ax.patches = ax.patches[-self.max_bars:]
+
+        # print(datetime.now() - lastTime)
+        # lastTime = datetime.now()
+
+        # return lines, patches
 
 
 def glimpse(df: DataFrame, size: int=5):
