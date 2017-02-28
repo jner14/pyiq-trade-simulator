@@ -10,13 +10,11 @@ from datetime import datetime, timedelta, time
 from pandas import DataFrame, read_csv, Series, concat
 from localconfig import dtn_product_id, dtn_login, dtn_password
 from multiprocessing import Queue
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-import matplotlib.ticker as mticker
-from matplotlib.finance import candlestick_ohlc
-from matplotlib import style as mplStyle
+from matplotlib import style as mplStyle, animation, pyplot as plt, dates as mdates, ticker as mticker
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
+from matplotlib.finance import candlestick_ohlc
+import threading
 
 
 TIMEZONE = timezone('US/Eastern')
@@ -100,13 +98,19 @@ class Simulator(object):
     MARKET_OPEN = time(hour=8)
     MARKET_CLOSE = time(hour=16)
 
-    def __init__(self, ticker: str, days_back: int=1, backtest: bool=False, offline: bool=False):
+    def __init__(self, ticker: str, stop: float, target: float, signal_func_a, signal_func_b,
+                 bar_cnt: int, days_back: int=1, backtest: bool=False, offline: bool=False):
         self.ticker = ticker
+        self.stop = stop
+        self.target = target
+        self.signal_func_a = signal_func_a
+        self.signal_func_b = signal_func_b
+        self.bar_cnt = bar_cnt
         self.daysBack = days_back
         self.backtest = backtest
+        self.offline = backtest
         self.backtest_period = 1
         self._bt_minutes = None
-        self.offline = offline
         self._watching = False
         self._queue = Queue()
         self.market_hours_only = True
@@ -122,8 +126,8 @@ class Simulator(object):
         lgr.info("Market hours are set to 8AM - 4PM EST")
         self.load_minute_data()
         self.load_trades()
-        self.max_bars = 120
-        self.bar_width = .0004
+        self.chart_max_bars = 100
+        self.chart_bar_width = .0004
         self._current_chart_time = None
         self._fig = plt.figure()
         self.bar_up_color = '#66f4f2'
@@ -134,33 +138,76 @@ class Simulator(object):
         self._stop_price = 0.0
         self._target_price = 0.0
         self.charting_enabled = True
+        self._lastChartX = None
+        self.thread = threading.Thread(target=self._run)
+        self.thread.daemon = True
 
-    def start(self, output_type: str='queue'):
-        if not self.offline:
+    def start(self):
+
+        # Chart animation code here
+        if self.charting_enabled:
+            self.thread.start()
+            while True:
+                self._update_chart()
+        else:
+            self._run()
+
+    def _run(self):
+
+        if not self.backtest:
+            self.wait_market_hours()
+
             Simulator._launch_service()
-            # sleep(10)
             self._quote_conn = iq.QuoteConn(name="Simulator-trades_only")
-            self._trade_listener = HandyListener("Trades Listener", self._queue, output_type)
+            self._trade_listener = HandyListener("Trades Listener", self._queue)
             self._quote_conn.add_listener(self._trade_listener)
 
-        try:
-            self._connector = iq.ConnConnector([self._quote_conn])
-            self._quote_conn.connect()
-            # sleep(2)
-        except Exception as e:
-            if not self.offline:
+            try:
+                self._connector = iq.ConnConnector([self._quote_conn])
+                self._quote_conn.connect()
+            except Exception as e:
                 lgr.critical("Failed to connect to with quote_conn!")
                 lgr.critical(e)
                 sys.exit()
-            return False
-        self._quote_conn.select_update_fieldnames(Simulator.FIELD_NAMES)
-        self._quote_conn.timestamp_off()
-        self._quote_conn.trades_watch(self.ticker)
-        self._watching = True
-        sleep(4)
-        self._download_missing(self.daysBack)
-        self._update_minute_bars()
-        return True
+
+            self._quote_conn.select_update_fieldnames(Simulator.FIELD_NAMES)
+            self._quote_conn.timestamp_off()
+            self._quote_conn.trades_watch(self.ticker)
+            self._watching = True
+            sleep(4)
+
+        if not self.offline:
+            self._download_missing(self.daysBack)
+            self._update_minute_bars()
+
+        mySignals = {}
+        while True:
+
+            # Grab the most recent number of bars as necessary for signal generation
+            bars = self.get_minute_bars(count=self.bar_cnt)
+            last_close = bars[-1][5]
+
+            # Calculate signals based on custom functions
+            mySignals['a'] = self.signal_func_a(bars)
+            mySignals['b'] = self.signal_func_b(bars)
+            finalSignal = Simulator.get_final_signal(mySignals)
+
+            # Simulate order actions
+            if finalSignal == 1:
+                # Limit buy
+                filled = self.limit_buy(last_close)
+                # If limit long was filled, create limit sell
+                if filled:
+                    self.limit_sell(last_close + self.target, last_close - self.stop)
+            elif finalSignal == -1:
+                # Limit short
+                filled = self.limit_short(last_close)
+                # If limit short was filled, create limit cover
+                if filled:
+                    self.limit_cover(last_close - self.target, last_close + self.stop)
+
+            # Wait for close of bar
+            self.wait_next_bar()
 
     def stop(self):
         if self._watching:
@@ -169,14 +216,27 @@ class Simulator(object):
             self._watching = False
             lgr.info("Done watching for trades.")
 
+    @staticmethod
+    def get_final_signal(signals):
+        # Process all signals to create a final signal
+
+        # Ex. If all signals are positive, return 1 (buy signal)
+        if sum(signals.values()) == len(signals):
+            return 1
+        # Ex. If all signals are negative, return -1 (sell signal)
+        if sum(signals.values()) == -len(signals):
+            return -1
+        # Ex. Otherwise, return 0 (hold signal)
+        return 0
+
     def get_minute_bars(self, count: int, as_dataframe: bool=False):
         """
         Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
         """
         lgr.debug("Getting minute bars. count={}".format(count))
         if self.backtest:
-            if self.charting_enabled:
-                self._update_chart()
+            # if self.charting_enabled:
+            #     self._update_chart()
             if len(self._minute_bars) < count:
                 for _ in range(count - len(self._minute_bars)):
                     self.wait_next_bar()
@@ -220,7 +280,11 @@ class Simulator(object):
             end_time = ltt.replace(second=0, microsecond=0)
             lgr.debug("Filtering updates({}) by start={}, end={}".format(len(self._updates), startTime, end_time))
             updateMask = (startTime < self._updates.Datetime) & (self._updates.Datetime < end_time)
-            assert updateMask.iloc[0], "Error: Updates are being filtered at start of list."
+            # try:
+            #     assert updateMask.iloc[0], "Updates are being filtered at start of list."
+            # except Exception as e:
+            #     print(e)
+            #     sys.exit()
             toMinutes = self._updates.loc[updateMask, :].copy()
 
             if len(toMinutes) > 0:
@@ -294,8 +358,8 @@ class Simulator(object):
             for _ in range(update_count):
                 i = 0 if len(self._updates) == 0 else self._updates.iloc[-1].name
                 self._updates.loc[i + 1] = self._queue.get()
-            if self.charting_enabled:
-                self._update_chart()
+            # if self.charting_enabled:
+            #     self._update_chart()
         else:
             self._received_updates = False
 
@@ -305,6 +369,8 @@ class Simulator(object):
             if len(self._bt_minutes) != 0:
                 self._minute_bars = self._minute_bars.append(self._bt_minutes.iloc[0])
                 self._bt_minutes = self._bt_minutes.iloc[1:]
+                if self.charting_enabled:
+                    sleep(.1)
             else:
                 lgr.info("Finished backtesting!")
                 sys.exit()
@@ -334,7 +400,7 @@ class Simulator(object):
         self.save_trades()
         self._in_trade = True
 
-    def limit_buy(self, price, delay=0.1, timeout=5):
+    def limit_buy(self, price, delay=0.5, timeout=1):
         lgr.info("Waiting to enter long position at price={}".format(rnd(price)))
         startTime = self._minute_bars.index[-1] if self.backtest else datetime.now()
         filled = False
@@ -397,7 +463,7 @@ class Simulator(object):
         self.save_trades()
         self._in_trade = False
 
-    def limit_cover(self, target, stop, delay=0.1):
+    def limit_cover(self, target, stop, delay=0.5):
         lgr.info("Waiting to exit short position at target={}, stop={}".format(rnd(target), rnd(stop)))
         self._stop_price = stop
         self._target_price = target
@@ -432,7 +498,7 @@ class Simulator(object):
                 # Update minutes
                 sleep(delay)
 
-    def limit_sell(self, target, stop, delay=0.1):
+    def limit_sell(self, target, stop, delay=0.5):
         lgr.info("Waiting to exit long position at target={} ,stop={}".format(rnd(target), rnd(stop)))
         self._stop_price = stop
         self._target_price = target
@@ -486,7 +552,7 @@ class Simulator(object):
         self.save_trades()
         self._in_trade = True
 
-    def limit_short(self, price, delay=0.1, timeout=5):
+    def limit_short(self, price, delay=0.5, timeout=1):
         lgr.info("Waiting to enter short position at price={}".format(rnd(price)))
         startTime = self._minute_bars.index[-1] if self.backtest else datetime.now()
         filled = False
@@ -707,15 +773,21 @@ class Simulator(object):
             sleep(1)
 
     def _update_chart(self):
+        # self.ax1.clear()
+        # self.ax2.clear()
+
+        st = datetime.now()  # Debug code
+
         if len(self._minute_bars) == 0:
             return
         st = datetime.now()
-        ohlc = self._minute_bars.ix[-self.max_bars:, ['Open', 'High', 'Low', 'Close']]
+        ohlc = self._minute_bars.ix[-self.chart_max_bars:, ['Open', 'High', 'Low', 'Close']]
         ohlc.insert(0, 'Time', ohlc.index)
-        ohlc.Time = ohlc.Time.apply(lambda i: mdates.date2num(i))
+        ohlc.Time = ohlc.Time.apply(lambda t: mdates.date2num(t))
 
-        volume = self._minute_bars.ix[-self.max_bars:, ['UpVol', 'DownVol']]
-        volume.insert(0, 'Time', ohlc.Time)
+        volume = self._minute_bars.ix[-self.chart_max_bars:, ['UpVol', 'DownVol']]
+        volume.insert(0, 'Time', volume.index)
+        volume.Time = volume.Time.apply(lambda t: mdates.date2num(t))
 
         # If there are feed updates, create a partial minute bar to add to end of chart
         if len(self._updates) > 0:
@@ -745,24 +817,27 @@ class Simulator(object):
                                                     self.currentDownVol]
 
         self.ax1 = plt.subplot2grid((7, 1), (0, 0), rowspan=5, axisbg='#000000')
-        candlestick_ohlc(self.ax1, ohlc.values, width=self.bar_width,
+        candlestick_ohlc(self.ax1, ohlc.values, width=self.chart_bar_width,
                          colorup=self.bar_up_color, colordown=self.bar_down_color)
 
         # Draw target and stop indicators when in a trade
         bbox_props = dict(boxstyle="round", fc="black", ec="black", alpha=0.8, pad=.1)
-        if self._in_trade:
-            self.ax1.plot([ohlc.ix[-50, 'Time'], ohlc.ix[-1, 'Time']], [self._stop_price, self._stop_price],
+        if self._in_trade and len(self.ax1.lines) >= 50:
+            start_x = ohlc.ix[-50, 'Time']  # mdates.num2date(self.ax1.lines[-50]._x)
+            end_x = ohlc.ix[-1, 'Time']  # mdates.num2date(self.ax1.lines[-1]._x)
+
+            self.ax1.plot([start_x, end_x], [self._stop_price, self._stop_price],
                           color=self.stop_color, linewidth=1)
-            self.ax1.text(ohlc.ix[-50, 'Time'], self._stop_price, 'Stop={}'.format(self._stop_price), ha="left",
+            self.ax1.text(start_x, self._stop_price, 'Stop={}'.format(rnd(self._stop_price)), ha="left",
                           va="bottom", bbox=bbox_props, color=self.stop_color, size=8)
 
-            self.ax1.plot([ohlc.ix[-50, 'Time'], ohlc.ix[-1, 'Time']], [self._target_price, self._target_price],
+            self.ax1.plot([start_x, end_x], [self._target_price, self._target_price],
                           color=self.target_color, linewidth=1)
-            self.ax1.text(ohlc.ix[-50, 'Time'], self._target_price, 'Target={}'.format(self._target_price), ha="left",
+            self.ax1.text(start_x, self._target_price, 'Target={}'.format(rnd(self._target_price)), ha="left",
                           va="bottom", bbox=bbox_props, color=self.target_color, size=8)
 
         # Draw trade entry and exit indicators
-        trades = self.trades.loc[((self.trades.index > ohlc.index[0]) & (self.trades.index < ohlc.index[-1]))]
+        trades = self.trades.loc[(self.trades.index > ohlc.index[0])]  # & (self.trades.index < ohlc.index[-1]))]
         for k, row in trades.iterrows():
             xy = (k, row.Price)
             color, marker = ('red', 'v') if row.Type in ['short-entry'] else ('green', '^')
@@ -779,8 +854,8 @@ class Simulator(object):
 
         self.ax2 = plt.subplot2grid((7, 1), (5, 0), rowspan=2, axisbg='#000000', sharex=self.ax1)
 
-        self.ax2.bar(volume.Time.values, volume.UpVol.values, self.bar_width, color=self.bar_up_color)
-        self.ax2.bar(volume.Time.values, volume.DownVol.values, self.bar_width, color=self.bar_down_color)
+        self.ax2.bar(volume.Time.values, volume.UpVol.values, self.chart_bar_width, color=self.bar_up_color)
+        self.ax2.bar(volume.Time.values, volume.DownVol.values, self.chart_bar_width, color=self.bar_down_color)
 
         plt.xlabel('Time')
         plt.ylabel('Volume')
@@ -788,93 +863,7 @@ class Simulator(object):
         plt.setp(self.ax1.get_xticklabels(), visible=False)
         plt.subplots_adjust(left=0.16, bottom=0.20, right=0.94, top=0.90, wspace=0.2, hspace=0)
         plt.pause(1e-7)
-        print(datetime.now() - st)
-
-    def _candlestick(self, ax, quotes, width=0.2, colorup='k', colordown='r', alpha=1.0):
-
-        """
-        Adapted from matplotlib finance module.
-        Plot the time, open, high, low, close as a vertical line ranging
-        from low to high.  Use a rectangular bar to represent the
-        open-close span.  If close >= open, use colorup to color the bar,
-        otherwise use colordown
-
-        Parameters
-        ----------
-        ax : `Axes`
-            an Axes instance to plot to
-        quotes : sequence of quote sequences
-            data to plot.  time must be in float date format - see date2num
-            (time, open, high, low, close, ...) vs
-            (time, open, close, high, low, ...)
-            set by `ochl`
-        width : float
-            fraction of a day for the rectangle width
-        colorup : color
-            the color of the rectangle where close >= open
-        colordown : color
-             the color of the rectangle where close <  open
-        alpha : float
-            the rectangle alpha level
-
-        Returns
-        -------
-        ret : tuple
-            returns (lines, patches) where lines is a list of lines
-            added and patches is a list of the rectangle patches added
-
-        """
-        # global lines, patches
-
-        OFFSET = width / 2.0
-
-        # lines = []
-        # patches = []
-        # print(len(quotes))
-        for q in quotes:
-            t, open, high, low, close = q[:5]
-
-            if close >= open:
-                color = colorup
-                lower = open
-                height = close - open
-            else:
-                color = colordown
-                lower = close
-                height = open - close
-
-            vLine = Line2D(
-                xdata=(t, t), ydata=(low, high),
-                color=color,
-                linewidth=0.5,
-                antialiased=True,
-            )
-
-            rect = Rectangle(
-                xy=(t - OFFSET, lower),
-                width=width,
-                height=height,
-                facecolor=color,
-                edgecolor=color,
-            )
-            rect.set_alpha(alpha)
-
-            # lines.append(vLine)
-            # patches.append(rect)
-            ax.add_line(vLine)
-            ax.add_patch(rect)
-
-        # lastTime = datetime.now()
-        # lines = lines[-self.max_bars:]
-        # print("len patches={}".format(len(patches)))
-        ax.lines = ax.lines[-self.max_bars:]
-        # patches = patches[-self.max_bars:]
-        ax.patches = ax.patches[-self.max_bars:]
-
-        # print(datetime.now() - lastTime)
-        # lastTime = datetime.now()
-
-        # return lines, patches
+        # print(datetime.now() - st)
 
 
 def glimpse(df: DataFrame, size: int=5):
