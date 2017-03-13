@@ -141,6 +141,7 @@ class Simulator(object):
         self._lastChartX = None
         self.thread = threading.Thread(target=self._run)
         self.thread.daemon = True
+        self.lock = threading.Lock()
 
     def start(self):
 
@@ -355,11 +356,13 @@ class Simulator(object):
         lgr.debug("Getting updates. qsize={}, current updates={}".format(self._queue.qsize(), len(self._updates)))
         if update_count > 0:
             self._received_updates = True
+            newUpdates = DataFrame(columns=self._updates.columns)
+            i = 0 if len(self._updates) == 0 else self._updates.index[-1]
             for _ in range(update_count):
-                i = 0 if len(self._updates) == 0 else self._updates.iloc[-1].name
-                self._updates.loc[i + 1] = self._queue.get()
-            # if self.charting_enabled:
-            #     self._update_chart()
+                newUpdates.loc[i + 1] = self._queue.get()
+                i = newUpdates.index[-1]
+            with self.lock:
+                self._updates = concat([self._updates, newUpdates])
         else:
             self._received_updates = False
 
@@ -790,26 +793,28 @@ class Simulator(object):
         volume.Time = volume.Time.apply(lambda t: mdates.date2num(t))
 
         # If there are feed updates, create a partial minute bar to add to end of chart
-        if len(self._updates) > 0:
+        with self.lock:
+            updatesCopy = self._updates.copy()
+        if len(updatesCopy) > 0:
             # Use the time of the last recorded minute bar as a reference
             lastMinute = self._minute_bars.index[-1]
             # If this is the first run or the last minute bar has caught up to the partial minute bar
             if self._current_chart_time is None or self._current_chart_time <= lastMinute:
                 # Create a new partial minute bar with the latest feed updates
                 self._current_chart_time = lastMinute + timedelta(minutes=1)
-                self.currentChartOpen = self._updates.iloc[0].Open
-                self.currentChartHigh = self._updates.High.max()
-                self.currentChartLow = self._updates.Low.min()
-                self.currentChartClose = self._updates.iloc[-1].Close
-                self.currentUpVol = self._updates.UpVol.sum()
-                self.currentDownVol = self._updates.DownVol.sum()
+                self.currentChartOpen = updatesCopy.iloc[0].Open
+                self.currentChartHigh = updatesCopy.High.max()
+                self.currentChartLow = updatesCopy.Low.min()
+                self.currentChartClose = updatesCopy.iloc[-1].Close
+                self.currentUpVol = updatesCopy.UpVol.sum()
+                self.currentDownVol = updatesCopy.DownVol.sum()
             # Otherwise, just update the current partial minute bar
             else:
-                self.currentChartHigh = self._updates.High.max()
-                self.currentChartLow = self._updates.Low.min()
-                self.currentChartClose = self._updates.iloc[-1].Close
-                self.currentUpVol = self._updates.UpVol.sum()
-                self.currentDownVol = self._updates.DownVol.sum()
+                self.currentChartHigh = updatesCopy.High.max()
+                self.currentChartLow = updatesCopy.Low.min()
+                self.currentChartClose = updatesCopy.iloc[-1].Close
+                self.currentUpVol = updatesCopy.UpVol.sum()
+                self.currentDownVol = updatesCopy.DownVol.sum()
 
             ohlc.loc[self._current_chart_time] = [mdates.date2num(self._current_chart_time), self.currentChartOpen,
                                                   self.currentChartHigh, self.currentChartLow, self.currentChartClose]

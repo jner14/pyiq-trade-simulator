@@ -32,7 +32,7 @@ if __name__ == "__main__":
 
     # Simulation Parameters
     ticker        = p_args.ticker    # symbol to simulate trades for
-    days_back     = 7                # days of historical data to download if minute_bars.csv is missing
+    days_back     = 3                # days of historical data to download if minute_bars.csv is missing
     stop          = 3 * .0000005     # tick count * tick value (e.g. $.25 is for s&p emini) .0000005
     target        = 3 * .0000005     # tick count * tick value
     signal_func_a = get_signal_a     # function name for generating a signal
