@@ -57,7 +57,7 @@ if __name__ == "__main__":
 
     # Default market hours are 8AM - 4PM EST. Times are set using:
     #     sim.set_market_hours(start_hour=int, start_minute=int, end_hour=int, end_minute=int)
-    sim.market_hours_only = False  # Limit feed updates to market hours?
+    sim.market_hours_only = True  # Limit feed updates to market hours?
 
     # Enable or disable charting
     sim.charting_enabled = True

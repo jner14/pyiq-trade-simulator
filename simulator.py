@@ -41,8 +41,9 @@ lgr.addHandler(ch)
 
 class HandyListener(iq.VerboseQuoteListener):
 
-    def __init__(self, name: str, queue: Queue, output_type: str='queue'):
+    def __init__(self, name: str, queue: DataFrame, lock: threading.Lock, output_type: str='queue'):
         super().__init__(name)
+        self._lock = lock
         self.queue = queue
         self.output_type = output_type  # 'queue', 'console'
         self.lgr = logging.getLogger("HandyListener")
@@ -87,10 +88,13 @@ class HandyListener(iq.VerboseQuoteListener):
         debug_labels = UPDATES_LABELS.copy()
         debug_labels.remove("Datetime")
         update_debug_str = "{}, {}, {}".format(t1, data.loc[debug_labels].values, update[6])
-        self.lgr.debug("qsize: {}, update: {}".format(self.queue.qsize(), update_debug_str))
+        self.lgr.debug("qsize: {}, update: {}".format(len(self.queue), update_debug_str))
 
         # Place update data in queue for retrieval from simulator
-        self.queue.put(data.loc[UPDATES_LABELS])
+        # self.queue.put(data.loc[UPDATES_LABELS])
+        with self._lock:
+            i = 0 if len(self.queue) == 0 else self.queue.index[-1] + 1
+            self.queue.loc[i] = data.loc[UPDATES_LABELS]
 
 
 class Simulator(object):
@@ -112,7 +116,7 @@ class Simulator(object):
         self.backtest_period = 1
         self._bt_minutes = None
         self._watching = False
-        self._queue = Queue()
+        self._queue = DataFrame(columns=UPDATES_LABELS)
         self.market_hours_only = True
         self.trades = DataFrame(columns=['Price', 'Type'])
         self._minute_bars = DataFrame(columns=['Open', 'High', 'Low', 'Close', 'UpVol', 'DownVol',
@@ -141,7 +145,7 @@ class Simulator(object):
         self._lastChartX = None
         self.thread = threading.Thread(target=self._run)
         self.thread.daemon = True
-        self.lock = threading.Lock()
+        self._lock = threading.Lock()
 
     def start(self):
 
@@ -160,7 +164,7 @@ class Simulator(object):
 
             Simulator._launch_service()
             self._quote_conn = iq.QuoteConn(name="Simulator-trades_only")
-            self._trade_listener = HandyListener("Trades Listener", self._queue)
+            self._trade_listener = HandyListener("Trades Listener", self._queue, self._lock)
             self._quote_conn.add_listener(self._trade_listener)
 
             try:
@@ -294,8 +298,9 @@ class Simulator(object):
                 self._minute_bars = self._minute_bars.iloc[:-1]
                 toMinutes.loc[(toMinutes.index[-1] + 1), :] = [0] * 16
                 toMinutes = toMinutes.shift(1)
-                toMinutes.loc[toMinutes.iloc[0].name] = ['', m.name, m.Open, m.High, m.Low, m.Close, .0, 0, .0, .0, m.UpVol,
-                                                         m.DownVol, m.TotalVol, m.UpTicks, m.DownTicks, m.TotalTicks]
+                toMinutes.iloc[0] = Series(["", .0, .0, .0, 0, m.name, m.Open, m.High, m.Low, m.Close, m.UpVol,
+                                            m.DownVol, m.TotalVol, m.UpTicks, m.DownTicks, m.TotalTicks],
+                                           index=UPDATES_LABELS)
         else:
             # lgr.debug("No minute da")
             toMinutes = self._updates
@@ -352,17 +357,12 @@ class Simulator(object):
             self.save_minute_data()
 
     def _get_updates(self):
-        update_count = self._queue.qsize()
-        lgr.debug("Getting updates. qsize={}, current updates={}".format(self._queue.qsize(), len(self._updates)))
-        if update_count > 0:
+        lgr.debug("Getting updates. qsize={}, current updates={}".format(len(self._queue), len(self._updates)))
+        if len(self._queue) > 0:
             self._received_updates = True
-            newUpdates = DataFrame(columns=self._updates.columns)
-            i = 0 if len(self._updates) == 0 else self._updates.index[-1]
-            for _ in range(update_count):
-                newUpdates.loc[i + 1] = self._queue.get()
-                i = newUpdates.index[-1]
-            with self.lock:
-                self._updates = concat([self._updates, newUpdates])
+            with self._lock:
+                self._updates = concat([self._updates, self._queue], ignore_index=True)
+                self._queue.drop(self._queue.index, axis=0, inplace=True)
         else:
             self._received_updates = False
 
@@ -391,7 +391,7 @@ class Simulator(object):
                     to_wait = (endTime - currTime).total_seconds()
                     lgr.info("Waiting {} seconds for next bar. updates={}, qsize={}".format(round(to_wait),
                                                                                             len(self._updates),
-                                                                                            self._queue.qsize()))
+                                                                                            len(self._queue)))
 
     def _buy(self, price):
         if self.backtest:
@@ -433,7 +433,7 @@ class Simulator(object):
                             filled = True
                             break
 
-                    log_args = rnd(row.Last), rnd(price), len(self._updates), self._queue.qsize()
+                    log_args = rnd(row.Last), rnd(price), len(self._updates), len(self._queue)
                     self._update_minute_bars()
 
                     if filled:
@@ -492,7 +492,7 @@ class Simulator(object):
                             self._cover(row.Last)
                             return
 
-                    log_args = rnd(row.Last), rnd(target), rnd(stop), len(self._updates), self._queue.qsize()
+                    log_args = rnd(row.Last), rnd(target), rnd(stop), len(self._updates), len(self._queue)
                     lgr.info("Awaiting short exit: [price={}, target={}, stop={}, updates={}, qsize={}]".
                              format(*log_args))
 
@@ -527,7 +527,7 @@ class Simulator(object):
                             self._sell(row.Last)
                             return
 
-                    log_args = rnd(row.Last), rnd(target), rnd(stop), len(self._updates), self._queue.qsize()
+                    log_args = rnd(row.Last), rnd(target), rnd(stop), len(self._updates), len(self._queue)
                     lgr.info("Awaiting long exit: [price={}, target={}, stop={}, updates={}, qsize={}]".
                              format(*log_args))
                     self._update_minute_bars()
@@ -584,7 +584,7 @@ class Simulator(object):
                             filled = True
                             break
 
-                    log_args = rnd(row.Last), rnd(price), len(self._updates), self._queue.qsize()
+                    log_args = rnd(row.Last), rnd(price), len(self._updates), len(self._queue)
                     self._update_minute_bars()
 
                     if filled:
@@ -657,10 +657,8 @@ class Simulator(object):
             startTime = self._minute_bars.index[-1] + timedelta(seconds=60)
             # startTime = startTime.tz_localize(TIMEZONE)
 
-        qsize = self._queue.qsize()
         # endTime = datetime.now(TIMEZONE).replace(tzinfo=None)
-        for _ in range(qsize):
-            self._queue.get()
+        self._queue.drop(self._queue.index, axis=0, inplace=True)
         self._updates = self.get_ticks_for_period(start=startTime, end=None)
         # What if as part of update minute bars we check to see if there is any gap between currently loaded minute bars
         # and the current time stamp.
@@ -793,7 +791,7 @@ class Simulator(object):
         volume.Time = volume.Time.apply(lambda t: mdates.date2num(t))
 
         # If there are feed updates, create a partial minute bar to add to end of chart
-        with self.lock:
+        with self._lock:
             updatesCopy = self._updates.copy()
         if len(updatesCopy) > 0:
             # Use the time of the last recorded minute bar as a reference
@@ -821,7 +819,7 @@ class Simulator(object):
             volume.loc[self._current_chart_time] = [mdates.date2num(self._current_chart_time), self.currentUpVol,
                                                     self.currentDownVol]
 
-        self.ax1 = plt.subplot2grid((7, 1), (0, 0), rowspan=5, axisbg='#000000')
+        self.ax1 = plt.subplot2grid((7, 1), (0, 0), rowspan=5, facecolor='#000000')
         candlestick_ohlc(self.ax1, ohlc.values, width=self.chart_bar_width,
                          colorup=self.bar_up_color, colordown=self.bar_down_color)
 
@@ -857,7 +855,7 @@ class Simulator(object):
         self.ax1.set_axisbelow(True)
         plt.ylabel('Price')
 
-        self.ax2 = plt.subplot2grid((7, 1), (5, 0), rowspan=2, axisbg='#000000', sharex=self.ax1)
+        self.ax2 = plt.subplot2grid((7, 1), (5, 0), rowspan=2, facecolor='#000000', sharex=self.ax1)
 
         self.ax2.bar(volume.Time.values, volume.UpVol.values, self.chart_bar_width, color=self.bar_up_color)
         self.ax2.bar(volume.Time.values, volume.DownVol.values, self.chart_bar_width, color=self.bar_down_color)
