@@ -284,7 +284,8 @@ class Simulator(object):
                 return
             end_time = ltt.replace(second=0, microsecond=0)
             lgr.debug("Filtering updates({}) by start={}, end={}".format(len(self._updates), startTime, end_time))
-            updateMask = (startTime < self._updates.Datetime) & (self._updates.Datetime < end_time)
+            # updateMask = (startTime < self._updates.Datetime) & (self._updates.Datetime < end_time)
+            updateMask = self._updates.Datetime < end_time
             # try:
             #     assert updateMask.iloc[0], "Updates are being filtered at start of list."
             # except Exception as e:
