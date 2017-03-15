@@ -9,10 +9,7 @@ from pytz import timezone
 from datetime import datetime, timedelta, time
 from pandas import DataFrame, read_csv, Series, concat
 from localconfig import dtn_product_id, dtn_login, dtn_password
-from multiprocessing import Queue
-from matplotlib import style as mplStyle, animation, pyplot as plt, dates as mdates, ticker as mticker
-from matplotlib.lines import Line2D
-from matplotlib.patches import Rectangle
+from matplotlib import style as mplStyle, pyplot as plt, dates as mdates, ticker as mticker
 from matplotlib.finance import candlestick_ohlc
 import threading
 
@@ -383,7 +380,7 @@ class Simulator(object):
             endTime = lastBarTime + timedelta(minutes=2)
             sinceLast = datetime.now()
             while lastBarTime == self._minute_bars.index[-1]:
-                sleep(.1)
+                sleep(.2)
                 self._update_minute_bars()
                 now = datetime.now()
                 if now.second % 5 == 0 and now - sinceLast >= timedelta(seconds=5):
@@ -775,10 +772,6 @@ class Simulator(object):
             sleep(1)
 
     def _update_chart(self):
-        # self.ax1.clear()
-        # self.ax2.clear()
-
-        st = datetime.now()  # Debug code
 
         if len(self._minute_bars) == 0:
             return
@@ -867,7 +860,16 @@ class Simulator(object):
         plt.setp(self.ax1.get_xticklabels(), visible=False)
         plt.subplots_adjust(left=0.16, bottom=0.20, right=0.94, top=0.90, wspace=0.2, hspace=0)
         plt.pause(1e-7)
+        tdelta = datetime.now() - st
+        lgr.debug("Chart updated. tdelta={}, last update={}".format(tdelta, ohlc.index[-1]))
         # print(datetime.now() - st)
+
+    @staticmethod
+    def set_logging_level(level: str):
+        if level.lower() == "info":
+            fh.setLevel(logging.INFO)
+        elif level.lower() == "debug":
+            fh.setLevel(logging.DEBUG)
 
 
 def glimpse(df: DataFrame, size: int=5):
