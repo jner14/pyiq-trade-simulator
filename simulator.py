@@ -99,13 +99,21 @@ class Simulator(object):
     MARKET_OPEN = time(hour=8)
     MARKET_CLOSE = time(hour=16)
 
-    def __init__(self, ticker: str, stop: float, target: float, signal_func_a, signal_func_b,
-                 bar_cnt: int, days_back: int=1, backtest: bool=False, offline: bool=False):
+    def __init__(self,
+                 ticker: str,
+                 period: int,
+                 stop: float,
+                 target: float,
+                 signal_funcs,
+                 bar_cnt: int,
+                 days_back: int=1,
+                 backtest: bool=False,
+                 offline: bool=False):
         self.ticker = ticker
+        self.period = period
         self.stop = stop
         self.target = target
-        self.signal_func_a = signal_func_a
-        self.signal_func_b = signal_func_b
+        self.signal_funcs = signal_funcs
         self.bar_cnt = bar_cnt
         self.daysBack = days_back
         self.backtest = backtest
@@ -140,6 +148,8 @@ class Simulator(object):
         self._target_price = 0.0
         self.charting_enabled = True
         self._lastChartX = None
+        self.set_loop_func()
+        self.set_final_signal_func()
         self.thread = threading.Thread(target=self._run)
         self.thread.daemon = True
         self._lock = threading.Lock()
@@ -182,34 +192,44 @@ class Simulator(object):
             self._download_missing(self.daysBack)
             self._update_minute_bars()
 
-        mySignals = {}
         while True:
+            self.loop_func(self)
 
-            # Grab the most recent number of bars as necessary for signal generation
-            bars = self.get_minute_bars(count=self.bar_cnt)
-            last_close = bars[-1][5]
+    def set_loop_func(self, func=None):
+        if func is not None:
+            self.loop_func = func
+        else:
+            self.loop_func = self._default_loop_func
 
-            # Calculate signals based on custom functions
-            mySignals['a'] = self.signal_func_a(bars)
-            mySignals['b'] = self.signal_func_b(bars)
-            finalSignal = Simulator.get_final_signal(mySignals)
+    def _default_loop_func(self):
+        mySignals = {}
 
-            # Simulate order actions
-            if finalSignal == 1:
-                # Limit buy
-                filled = self.limit_buy(last_close)
-                # If limit long was filled, create limit sell
-                if filled:
-                    self.limit_sell(last_close + self.target, last_close - self.stop)
-            elif finalSignal == -1:
-                # Limit short
-                filled = self.limit_short(last_close)
-                # If limit short was filled, create limit cover
-                if filled:
-                    self.limit_cover(last_close - self.target, last_close + self.stop)
+        # Grab the most recent number of bars as necessary for signal generation
+        bars = self.get_minute_bars(count=self.bar_cnt)
+        last_close = bars[-1][5]
 
-            # Wait for close of bar
-            self.wait_next_bar()
+        # Calculate signals based on custom functions
+        for sig_func in self.signal_funcs:
+            mySignals[sig_func.__name__] = sig_func(bars)
+        finalSignal = self.get_final_signal(mySignals)
+
+        # Simulate order actions
+        if finalSignal == 1:
+            # Limit buy
+            filled = self.limit_buy(last_close)
+            # If limit long was filled, create limit sell
+            if filled:
+                self.limit_sell(last_close + self.target, last_close - self.stop)
+        elif finalSignal == -1:
+            # Limit short
+            filled = self.limit_short(last_close)
+            # If limit short was filled, create limit cover
+            if filled:
+                self.limit_cover(last_close - self.target, last_close + self.stop)
+
+        # Wait for close of bar
+        # TODO: change wait_next_bar so that it supports multiple periods
+        self.wait_next_bar()
 
     def stop(self):
         if self._watching:
@@ -219,7 +239,7 @@ class Simulator(object):
             lgr.info("Done watching for trades.")
 
     @staticmethod
-    def get_final_signal(signals):
+    def _default_final_signal_func(signals):
         # Process all signals to create a final signal
 
         # Ex. If all signals are positive, return 1 (buy signal)
@@ -230,6 +250,15 @@ class Simulator(object):
             return -1
         # Ex. Otherwise, return 0 (hold signal)
         return 0
+
+    def set_final_signal_func(self, func=None):
+        if func is not None:
+            self._final_signal_func = func
+        else:
+            self._final_signal_func = Simulator._default_final_signal_func
+
+    def get_final_signal(self, signals):
+        return self._final_signal_func(signals)
 
     def get_minute_bars(self, count: int, as_dataframe: bool=False):
         """
@@ -612,38 +641,41 @@ class Simulator(object):
         if self._minute_bars is not None:
             if not self.backtest:
                 # self.minutes.Datetime = self.minutes.Datetime.apply(lambda x: datetime.strftime(x, TIME_DATE_FORMAT))
-                self._minute_bars.to_csv("minute_bars.csv")
-                lgr.debug("Saved minute data to minute_bars.csv")
+                self._minute_bars.to_csv("{}_{}_minute_bars.csv".format(self.ticker, self.period))
+                lgr.debug("Saved minute data to {}_{}_minute_bars.csv".format(self.ticker, self.period))
         else:
-            lgr.error("Failed to save minute data, value=None")
+            lgr.error("Failed to save {}_{}_minute_bars.csv, value=None".format(self.ticker, self.period))
         # print("finished.")
 
     def load_minute_data(self):
         try:
             if self.backtest:
-                self._bt_minutes = read_csv("minute_bars.csv", index_col=0, parse_dates=True)
+                self._bt_minutes = read_csv("{}_{}_minute_bars.csv".format(self.ticker, self.period), index_col=0,
+                                            parse_dates=True)
             else:
-                self._minute_bars = read_csv("minute_bars.csv", index_col=0, parse_dates=True)
-            lgr.info("Loaded minute_bars.csv")
+                self._minute_bars = read_csv("{}_{}_minute_bars.csv".format(self.ticker, self.period), index_col=0,
+                                             parse_dates=True)
+            lgr.info("Loaded {}_{}_minute_bars.csv".format(self.ticker, self.period))
         except Exception as e:
-            lgr.error("Failed to load minute_bars.csv! {} ".format(e.args))
+            lgr.error("Failed to load {}_{}_minute_bars.csv! {} ".format(self.ticker, self.period, e.args))
 
     def save_trades(self):
         if self.trades is not None:
             if self.backtest:
-                self.trades.to_csv("backtest_trades.csv")
+                self.trades.to_csv("{}_{}_backtest_trades.csv".format(self.ticker, self.period))
             else:
-                self.trades.to_csv("trades.csv")
+                self.trades.to_csv("{}_{}_trades.csv".format(self.ticker, self.period))
         else:
-            lgr.error("Failed to save trades: value is None ")
+            lgr.error("Failed to {}_{}_trades.csv: value is None ".format(self.ticker, self.period))
 
     def load_trades(self):
         if not self.backtest:
             try:
-                self.trades = read_csv("trades.csv", index_col=0, parse_dates=True)
-                lgr.info("Loaded previous trades from trades.csv")
+                self.trades = read_csv("{}_{}_trades.csv".format(self.ticker, self.period), index_col=0,
+                                       parse_dates=True)
+                lgr.info("Loaded previous trades from {}_{}_trades.csv".format(self.ticker, self.period))
             except Exception as e:
-                lgr.error("Failed to read trades.csv! {} ".format(e.args))
+                lgr.error("Failed to read {}_{}_trades.csv! {} ".format(self.ticker, self.period, e.args))
 
     def _download_missing(self, max_days: int=1):
         if self.offline:
