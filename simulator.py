@@ -7,11 +7,13 @@ import logging
 from time import sleep
 from pytz import timezone
 from datetime import datetime, timedelta, time
-from pandas import DataFrame, read_csv, Series, concat
+from pandas import DataFrame, read_csv, read_sql_table, Series, concat
 from localconfig import dtn_product_id, dtn_login, dtn_password
 from matplotlib import style as mplStyle, pyplot as plt, dates as mdates, ticker as mticker
 from matplotlib.finance import candlestick_ohlc
 import threading
+import sqlite3 as lite
+import sqlalchemy
 
 
 TIMEZONE = timezone('US/Eastern')
@@ -22,6 +24,7 @@ LISTEN_LABELS = ['Symbol', 'Last', 'Bid', 'Ask', 'Tick', 'Size', 'Datetime', 'Op
                  'High', 'Low', 'UpTicks', 'DownTicks', 'TotalTicks', 'UpVol', 'DownVol', 'TotalVol']
 UPDATES_LABELS = ['Symbol', 'Last', 'Bid', 'Ask', 'Size', 'Datetime', 'Open', 'High', 'Low',
                   'Close', 'UpVol', 'DownVol', 'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks']
+TICK_LABELS = ['Datetime', 'Last', 'Bid', 'Ask', 'UpVol', 'DownVol', 'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks']
 mplStyle.use('dark_background')
 lgr = logging.getLogger('simulator')
 lgr.setLevel(logging.DEBUG)
@@ -43,12 +46,12 @@ class HandyListener(iq.VerboseQuoteListener):
         self._lock = lock
         self.queue = queue
         self.output_type = output_type  # 'queue', 'console'
-        self.lgr = logging.getLogger("HandyListener")
-        self.lgr.setLevel(logging.DEBUG)
-        fh2 = logging.FileHandler("simulator_iqfeed_updates.log")
-        fh2.setLevel(logging.DEBUG)
-        fh2.setFormatter(FORMATTER)
-        self.lgr.addHandler(fh2)
+        # self.lgr = logging.getLogger("HandyListener")
+        # self.lgr.setLevel(logging.DEBUG)
+        # fh2 = logging.FileHandler("simulator_iqfeed_updates.log")
+        # fh2.setLevel(logging.DEBUG)
+        # fh2.setFormatter(FORMATTER)
+        # self.lgr.addHandler(fh2)
 
     def process_update(self, update: np.array) -> None:
         assert len(update) == 1, "Received multiple updates. This is unexpected."
@@ -81,11 +84,11 @@ class HandyListener(iq.VerboseQuoteListener):
         data.Datetime = date + timedelta(microseconds=int(data.Datetime))
 
         # Add update data to debug output
-        t1 = data.Datetime.strftime(TIME_DATE_FORMAT)
-        debug_labels = UPDATES_LABELS.copy()
-        debug_labels.remove("Datetime")
-        update_debug_str = "{}, {}, {}".format(t1, data.loc[debug_labels].values, update[6])
-        self.lgr.debug("qsize: {}, update: {}".format(len(self.queue), update_debug_str))
+        # t1 = data.Datetime.strftime(TIME_DATE_FORMAT)
+        # debug_labels = UPDATES_LABELS.copy()
+        # debug_labels.remove("Datetime")
+        # update_debug_str = "{}, {}, {}".format(t1, data.loc[debug_labels].values, update[6])
+        # self.lgr.debug("qsize: {}, update: {}".format(len(self.queue), update_debug_str))
 
         # Place update data in queue for retrieval from simulator
         # self.queue.put(data.loc[UPDATES_LABELS])
@@ -95,7 +98,9 @@ class HandyListener(iq.VerboseQuoteListener):
 
 
 class Simulator(object):
-    FIELD_NAMES = ['Symbol', 'Last', 'Bid', 'Ask', 'Tick', 'Last Size', 'Last Time']
+    QUOTE_CONN_FIELDS = ['Symbol', 'Last', 'Bid', 'Ask', 'Tick', 'Last Size', 'Last Time']
+    MINUTE_LABELS = ['Open', 'High', 'Low', 'Close', 'UpVol', 'DownVol',
+                     'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks']
     MARKET_OPEN = time(hour=8)
     MARKET_CLOSE = time(hour=16)
 
@@ -124,8 +129,8 @@ class Simulator(object):
         self._queue = DataFrame(columns=UPDATES_LABELS)
         self.market_hours_only = True
         self.trades = DataFrame(columns=['Price', 'Type'])
-        self._minute_bars = DataFrame(columns=['Open', 'High', 'Low', 'Close', 'UpVol', 'DownVol',
-                                              'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks'])
+        self._minute_bars = DataFrame(columns=Simulator.MINUTE_LABELS)
+        self._ticks = DataFrame(columns=TICK_LABELS)
         self._updates = DataFrame(columns=UPDATES_LABELS)
         self._received_updates = False
         self._connector = None
@@ -133,6 +138,9 @@ class Simulator(object):
         self._trade_listener = None
         lgr.info("Starting new session...\n"+"#"*90+"\n\n"+"#"*90)
         lgr.info("Market hours are set to 8AM - 4PM EST")
+        self.db_con1 = sqlalchemy.create_engine("sqlite:///tick_data.sqlite3")
+        self.load_tick_data()
+        self._ticksUpdated = False
         self.load_minute_data()
         self.load_trades()
         self.chart_max_bars = 100
@@ -159,12 +167,17 @@ class Simulator(object):
         # Chart animation code here
         if self.charting_enabled:
             self.thread.start()
+            while not self._ticksUpdated:
+                lgr.info("Waiting for downloaded data to finish updating...")
+                sleep(2)
+            self.save_tick_data()
             while True:
                 self._update_chart()
         else:
             self._run()
 
     def _run(self):
+        self.db_con2 = lite.connect("tick_data.sqlite3")
 
         if not self.backtest:
             self.wait_market_hours()
@@ -182,7 +195,7 @@ class Simulator(object):
                 lgr.critical(e)
                 sys.exit()
 
-            self._quote_conn.select_update_fieldnames(Simulator.FIELD_NAMES)
+            self._quote_conn.select_update_fieldnames(Simulator.QUOTE_CONN_FIELDS)
             self._quote_conn.timestamp_off()
             self._quote_conn.trades_watch(self.ticker)
             self._watching = True
@@ -190,6 +203,13 @@ class Simulator(object):
 
         if not self.offline:
             self._download_missing(self.daysBack)
+            if len(self._minute_bars) > 0:
+                msk = self._ticks.Datetime < self._minute_bars.index[-1] + timedelta(minutes=1)
+            else:
+                msk = [True] * len(self._ticks)
+            self._ticks = concat([self._ticks[msk], self._updates.loc[:, TICK_LABELS]], ignore_index=True)
+            self._ticksUpdated = True
+            # self.save_tick_data()
             self._update_minute_bars()
 
         while True:
@@ -228,10 +248,9 @@ class Simulator(object):
                 self.limit_cover(last_close - self.target, last_close + self.stop)
 
         # Wait for close of bar
-        # TODO: change wait_next_bar so that it supports multiple periods
         self.wait_next_bar()
 
-    def stop(self):
+    def stop_iqfeed(self):
         if self._watching:
             self._quote_conn.unwatch(self.ticker)
             self._quote_conn.disconnect()
@@ -384,16 +403,24 @@ class Simulator(object):
             self.save_minute_data()
 
     def _get_updates(self):
-        lgr.debug("Getting updates. qsize={}, current updates={}".format(len(self._queue), len(self._updates)))
+        # lgr.debug("Getting updates. qsize={}, current updates={}".format(len(self._queue), len(self._updates)))
         if len(self._queue) > 0:
             self._received_updates = True
             with self._lock:
                 self._updates = concat([self._updates, self._queue], ignore_index=True)
+                st = datetime.now()
+                self._queue.loc[:, TICK_LABELS].to_sql(name=self.ticker, con=self.db_con2, if_exists='append', index=False)
+                delta = (datetime.now() - st).total_seconds()
+                self._ticks = concat([self._ticks, self._queue.loc[:, TICK_LABELS]], ignore_index=True)
                 self._queue.drop(self._queue.index, axis=0, inplace=True)
+            lgr.debug("Received updates. qsize={}, current updates={}, dbUpdated={:.4f}s".format(len(self._queue),
+                                                                                                 len(self._updates),
+                                                                                                 delta))
         else:
             self._received_updates = False
 
-    def wait_next_bar(self):
+    # TODO: change wait_next_bar so that it supports multiple periods
+    def wait_next_bar(self, delay=.5):
         if self.backtest:
             # Grab next bar from self.bt_minutes and add to self.minutes
             if len(self._bt_minutes) != 0:
@@ -409,7 +436,7 @@ class Simulator(object):
             endTime = lastBarTime + timedelta(minutes=2)
             sinceLast = datetime.now()
             while lastBarTime == self._minute_bars.index[-1]:
-                sleep(.2)
+                sleep(delay)
                 self._update_minute_bars()
                 now = datetime.now()
                 if now.second % 5 == 0 and now - sinceLast >= timedelta(seconds=5):
@@ -636,28 +663,61 @@ class Simulator(object):
         else:
             return False
 
+    def save_tick_data(self):
+        ts = datetime.now()
+        if self._ticks is not None:
+            if not self.backtest:
+                # values = [(str(r.Datetime), r.Last, r.Bid, r.Ask, r.UpVol, r.DownVol, r.TotalVol, r.UpTicks,
+                #           r.DownTicks, r.TotalTicks) for k, r in self._ticks.iterrows()]
+                # TODO: cleanup here after testing
+                # self.db_con = lite.connect(':memory:')
+                # self.stop_iqfeed()
+                # ts = datetime.now()
+                # ticks = self._ticks.copy()
+                # ticks.Datetime = ticks.Datetime.apply(lambda x: str(x))
+                # with self.db_con:
+                #     cur = self.db_con.cursor()
+                #     cur.execute("DROP TABLE IF EXISTS [%s]" % self.ticker)
+                #     cur.execute("CREATE TABLE [%s](Datetime TEXT, Last REAL, Bid REAL, Ask REAL, UpVol INT, DownVol INT, TotalVol INT, UpTicks INT, DownTicks INT, TotalTicks INT)" % self.ticker)
+                #     sqlite_string = "INSERT INTO [%s] VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" % self.ticker
+                #     cur.executemany(sqlite_string, ticks.values)
+                self._ticks.to_sql(name=self.ticker, con=self.db_con1, if_exists='replace', index=False)
+                # self._ticks.to_csv("{}_tick_data.csv".format(self.ticker), index=False)
+                # lgr.debug("Saved tick data to {}_tick_data.csv".format(self.ticker))
+                lgr.info("Tick data saved, Rows={}, Time={}".format(len(self._ticks), datetime.now() - ts))
+        else:
+            lgr.error("Failed to save tick data, value=None".format(self.ticker))
+
+    def load_tick_data(self):
+        ts = datetime.now()
+        try:
+            self._ticks = read_sql_table(self.ticker, self.db_con1, parse_dates='Datetime')
+            lgr.info("Loaded tick data, Time={}".format(datetime.now() - ts))
+        except Exception as e:
+            lgr.error("Failed to load tick data! {}, {}".format(self.ticker, e.args))
+
     def save_minute_data(self):
         # print("minutes.csv[", end='')
         if self._minute_bars is not None:
             if not self.backtest:
                 # self.minutes.Datetime = self.minutes.Datetime.apply(lambda x: datetime.strftime(x, TIME_DATE_FORMAT))
-                self._minute_bars.to_csv("{}_{}_minute_bars.csv".format(self.ticker, self.period))
-                lgr.debug("Saved minute data to {}_{}_minute_bars.csv".format(self.ticker, self.period))
+                self._minute_bars.to_csv("{}_{}_bars.csv".format(self.ticker, self.period))
+                lgr.debug("Saved minute data to {}_{}_bars.csv".format(self.ticker, self.period))
         else:
-            lgr.error("Failed to save {}_{}_minute_bars.csv, value=None".format(self.ticker, self.period))
+            lgr.error("Failed to save {}_{}_bars.csv, value=None".format(self.ticker, self.period))
         # print("finished.")
 
     def load_minute_data(self):
         try:
             if self.backtest:
-                self._bt_minutes = read_csv("{}_{}_minute_bars.csv".format(self.ticker, self.period), index_col=0,
+                self._bt_minutes = read_csv("{}_{}_bars.csv".format(self.ticker, self.period), index_col=0,
                                             parse_dates=True)
             else:
-                self._minute_bars = read_csv("{}_{}_minute_bars.csv".format(self.ticker, self.period), index_col=0,
+                self._minute_bars = read_csv("{}_{}_bars.csv".format(self.ticker, self.period), index_col=0,
                                              parse_dates=True)
-            lgr.info("Loaded {}_{}_minute_bars.csv".format(self.ticker, self.period))
+            lgr.info("Loaded {}_{}_bars.csv".format(self.ticker, self.period))
         except Exception as e:
-            lgr.error("Failed to load {}_{}_minute_bars.csv! {} ".format(self.ticker, self.period, e.args))
+            lgr.error("Failed to load {}_{}_bars.csv! {} ".format(self.ticker, self.period, e.args))
 
     def save_trades(self):
         if self.trades is not None:
@@ -690,9 +750,6 @@ class Simulator(object):
         # endTime = datetime.now(TIMEZONE).replace(tzinfo=None)
         self._queue.drop(self._queue.index, axis=0, inplace=True)
         self._updates = self.get_ticks_for_period(start=startTime, end=None)
-        # What if as part of update minute bars we check to see if there is any gap between currently loaded minute bars
-        # and the current time stamp.
-        # If there is a gap, then we download tick data for the period starting after loaded minutes end up until now
 
     def get_ticks_for_period(self, start: datetime, end: datetime):
         """Return tick data for specified period."""
