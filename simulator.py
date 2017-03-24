@@ -140,7 +140,8 @@ class Simulator(object):
         lgr.info("Market hours are set to 8AM - 4PM EST")
         self.db_con1 = sqlalchemy.create_engine("sqlite:///tick_data.sqlite3")
         self.load_tick_data()
-        self._ticksUpdated = False
+        self._ticksSaved = False
+        self._ticksDownloaded = False
         self.load_minute_data()
         self.load_trades()
         self.chart_max_bars = 100
@@ -164,13 +165,27 @@ class Simulator(object):
 
     def start(self):
 
-        # Chart animation code here
         if self.charting_enabled:
             self.thread.start()
-            while not self._ticksUpdated:
-                lgr.info("Waiting for downloaded data to finish updating...")
-                sleep(2)
-            self.save_tick_data()
+
+            while not self._ticksDownloaded:
+                lgr.info("Downloading tick data...")
+                sleep(5)
+
+            # If we are appending tick data, filter out duplicate values
+            ts = datetime.now()
+            if len(self._minute_bars) > 0:
+                msk2 = self._updates.Datetime > self._ticks.iloc[-1].Datetime
+                # Append downloaded ticks memory and db
+                self._ticks = concat([self._ticks, self._updates.loc[msk2, TICK_LABELS]], ignore_index=True)
+                self._updates.loc[msk2, TICK_LABELS].to_sql(name=self.ticker, con=self.db_con1, if_exists='append', index=False)
+            else:
+                self._ticks = self._updates.loc[:, TICK_LABELS]
+                self._updates.loc[:, TICK_LABELS].to_sql(name=self.ticker, con=self.db_con1, if_exists='append', index=False)
+
+            lgr.info("Tick data saved, Rows={}, Time={}".format(len(self._updates), datetime.now() - ts))
+
+            self._ticksSaved = True
             while True:
                 self._update_chart()
         else:
@@ -203,13 +218,10 @@ class Simulator(object):
 
         if not self.offline:
             self._download_missing(self.daysBack)
-            if len(self._minute_bars) > 0:
-                msk = self._ticks.Datetime < self._minute_bars.index[-1] + timedelta(minutes=1)
-            else:
-                msk = [True] * len(self._ticks)
-            self._ticks = concat([self._ticks[msk], self._updates.loc[:, TICK_LABELS]], ignore_index=True)
-            self._ticksUpdated = True
-            # self.save_tick_data()
+            self._ticksDownloaded = True
+            while not self._ticksSaved:
+                lgr.info("Storing tick data...")
+                sleep(5)
             self._update_minute_bars()
 
         while True:
@@ -309,6 +321,75 @@ class Simulator(object):
             to_send.insert(0, 'Date', [x.date() for x in to_send.index])
             return to_send.values
 
+    def get_n_minute_bars(self, interval: int, count: int, as_dataframe: bool=False):
+        """
+        Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
+        """
+        lgr.debug("Getting {} minute bars. count={}".format(interval, count))
+
+        # todo: consider checking whether request covers more time than we have, then downloading data or notifying user
+        minuteBarCount = interval * (count+1)
+
+        # If backtesting check for and then wait if there are not enough bars available
+        if self.backtest:
+            # todo: test this
+            if len(self._minute_bars) < minuteBarCount:
+                for _ in range(minuteBarCount - len(self._minute_bars)):
+                    self.wait_next_bar()
+
+        # Update minute bars and warn if there is a gap in minutes which could indicate feed issues
+        if not self.offline:
+            self._update_minute_bars()
+            ts = datetime.now(TIMEZONE).replace(tzinfo=None)
+            timeSLT = ts - self._minute_bars.index[-1] - timedelta(minutes=1)  # time since last bar closed
+            if timeSLT > timedelta(minutes=5):
+                lgr.warning("It has been {} day(s), {:.0f} hour(s), and {:.0f} minute(s) since the last close on record!".
+                            format(timeSLT.days, timeSLT.seconds / 3600, timeSLT.seconds % 3600 / 60))
+
+        # Re-sample minute bars into N minute bars
+        toMinutes = self._minute_bars.iloc[-minuteBarCount:]
+        resampled = DataFrame()
+        resampled['Bars']  = toMinutes.Open.resample('%sT' % interval).count()
+        resampled['Open']  = toMinutes.Open.resample('%sT' % interval).first()
+        resampled['High']  = toMinutes.High.resample('%sT' % interval).max()
+        resampled['Low']   = toMinutes.Low.resample('%sT' % interval).min()
+        resampled['Close'] = toMinutes.Close.resample('%sT' % interval).last()
+        rem_labels = ['UpVol', 'DownVol', 'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks']
+        resampled[rem_labels] = toMinutes.loc[:, rem_labels].resample('%sT' % interval).sum()
+
+        # Resample minute bars to 15 minutes in order to remove empty areas
+        min15 = resampled.resample('15T').first()
+        # Create mask where rows are not null and not equal to zero
+        nanMask1 = ~(min15.Open.isnull()) & (min15.TotalVol != 0)
+        # Append a row to mask that matches last minute bar of resampled in prep for upsampling
+        nanMask1.loc[resampled.index[-1]] = nanMask1.iloc[-1]
+        # Upsample the mask to minutes and fill values forward
+        nanMask1 = nanMask1.resample('%sT' % interval).ffill()
+        # Filter mask to only include rows in resampled
+        nanMask1 = nanMask1.loc[resampled.index[0]:, ]
+        # Filter minute bars by mask, keeping only those that have activity within fifteen minute time span
+        resampled = resampled[nanMask1]
+
+        # Fill empty bars
+        nanMask2 = resampled.Open.isnull()
+        resampled.loc[:, 'Close'] = resampled.loc[:, 'Close'].ffill()
+        resampled.loc[nanMask2, 'Open'] = resampled.loc[nanMask2, 'Close']
+        resampled.loc[nanMask2, 'High'] = resampled.loc[nanMask2, 'Close']
+        resampled.loc[nanMask2, 'Low'] = resampled.loc[nanMask2, 'Close']
+        resampled.fillna(0, inplace=True)
+
+        # Extract only full bars
+        # todo: consider not filtering out partial 30 or 60 minute intervals during close since they won't have enough
+        resampled = resampled.loc[resampled.Bars == interval, Simulator.MINUTE_LABELS].tail(count)
+
+        # Return values as either DataFrame or numpy array
+        if as_dataframe:
+            return resampled
+        else:
+            resampled.insert(0, 'Time', [x.time() for x in resampled.index])
+            resampled.insert(0, 'Date', [x.date() for x in resampled.index])
+            return resampled.values
+
     def _update_minute_bars(self):
         lgr.debug("Updating minute bars. len(updates)={}, len(minutes)={}".format(len(self._updates),
                                                                                   len(self._minute_bars)))
@@ -404,7 +485,7 @@ class Simulator(object):
 
     def _get_updates(self):
         # lgr.debug("Getting updates. qsize={}, current updates={}".format(len(self._queue), len(self._updates)))
-        if len(self._queue) > 0:
+        if len(self._queue) > 0 and self._ticksSaved:
             self._received_updates = True
             with self._lock:
                 self._updates = concat([self._updates, self._queue], ignore_index=True)
@@ -663,31 +744,6 @@ class Simulator(object):
         else:
             return False
 
-    def save_tick_data(self):
-        ts = datetime.now()
-        if self._ticks is not None:
-            if not self.backtest:
-                # values = [(str(r.Datetime), r.Last, r.Bid, r.Ask, r.UpVol, r.DownVol, r.TotalVol, r.UpTicks,
-                #           r.DownTicks, r.TotalTicks) for k, r in self._ticks.iterrows()]
-                # TODO: cleanup here after testing
-                # self.db_con = lite.connect(':memory:')
-                # self.stop_iqfeed()
-                # ts = datetime.now()
-                # ticks = self._ticks.copy()
-                # ticks.Datetime = ticks.Datetime.apply(lambda x: str(x))
-                # with self.db_con:
-                #     cur = self.db_con.cursor()
-                #     cur.execute("DROP TABLE IF EXISTS [%s]" % self.ticker)
-                #     cur.execute("CREATE TABLE [%s](Datetime TEXT, Last REAL, Bid REAL, Ask REAL, UpVol INT, DownVol INT, TotalVol INT, UpTicks INT, DownTicks INT, TotalTicks INT)" % self.ticker)
-                #     sqlite_string = "INSERT INTO [%s] VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)" % self.ticker
-                #     cur.executemany(sqlite_string, ticks.values)
-                self._ticks.to_sql(name=self.ticker, con=self.db_con1, if_exists='replace', index=False)
-                # self._ticks.to_csv("{}_tick_data.csv".format(self.ticker), index=False)
-                # lgr.debug("Saved tick data to {}_tick_data.csv".format(self.ticker))
-                lgr.info("Tick data saved, Rows={}, Time={}".format(len(self._ticks), datetime.now() - ts))
-        else:
-            lgr.error("Failed to save tick data, value=None".format(self.ticker))
-
     def load_tick_data(self):
         ts = datetime.now()
         try:
@@ -784,7 +840,8 @@ class Simulator(object):
                                                               bgn_prd=start,
                                                               end_prd=end)
 
-                lgr.info("Download finished. Calculating volume and tick data...")
+                # Generate fields for [up ticks, down ticks, total ticks, up volume, down volume, and total volume]
+                lgr.info("Downloaded %s ticks. Calculating volume and tick data..." % len(tick_data))
                 df = DataFrame(np.flipud(tick_data))
                 df.drop(['cond1', 'cond2', 'cond3', 'cond4', 'mkt_ctr', 'last_type', 'tick_id', 'tot_vlm'], axis=1, inplace=True)
                 df.columns = ['date', 'time', 'Last', 'Size', 'Bid', 'Ask']
@@ -806,11 +863,11 @@ class Simulator(object):
                 df.drop(['date', 'time', 'prev', 'change'], axis=1, inplace=True)
                 for label in ['Close', 'Low', 'High', 'Open']:
                     df.insert(2, label, df.Last)
-                lgr.info("Done calculating new fields.")
+                lgr.info("Done calculating volume and tick fields.")
                 return df
 
             except (iq.NoDataError, iq.UnauthorizedError) as err:
-                lgr.critical("No data returned because {0}".format(err))
+                lgr.critical("No data returned because {}".format(err))
                 sys.exit()
 
     @staticmethod
