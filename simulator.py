@@ -7,7 +7,7 @@ import logging
 from time import sleep
 from pytz import timezone
 from datetime import datetime, timedelta, time
-from pandas import DataFrame, read_csv, read_sql_table, Series, concat
+from pandas import DataFrame, read_csv, read_sql_table, Series, concat, cut as pdcut
 from localconfig import dtn_product_id, dtn_login, dtn_password
 from matplotlib import style as mplStyle, pyplot as plt, dates as mdates, ticker as mticker
 from matplotlib.finance import candlestick_ohlc
@@ -291,6 +291,89 @@ class Simulator(object):
     def get_final_signal(self, signals):
         return self._final_signal_func(signals)
 
+    def get_tick_bars(self, interval: int=1, max_bars: int=0, max_time_span: int=0, as_dataframe: bool=False):
+        """
+        interval:       int=1,      the interval of tick bars returned
+        max_bars:       int=0,      the number of tick bars returned
+        max_time_span:  int=0,      the max time span from last tick of tick bars in seconds returned
+        as_dataframe:   bool=False, whether a pandas DataFrame should be returned instead of a numpy array
+
+        *Note: both of max_bars and max_time_span can be passed, but the shorter of the two will be returned
+
+        Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
+        """
+
+        lgr.debug("Getting {}-tick bars. max_bars={}, max_time_span={}".format(interval, max_bars, max_time_span))
+
+        # assert both max_bars and max_time_span are not zero
+        assert (max_bars != 0 or max_time_span != 0), "must pass non-zero value for either max_bars or max_time_span"
+
+        # assert paramaters passed are not less than zero
+        assert (max_bars >= 0 and max_time_span >= 0 and interval >= 0), "must pass positive values"
+
+        # todo: consider implementing backtesting with ticks
+        assert not self.backtest, "backtesting is not implemented for get_tick_bars"
+
+        # Update minute bars and warn if there is a gap in minutes which could indicate feed issues
+        if not self.offline:
+            self._update_minute_bars()
+            ts = datetime.now(TIMEZONE).replace(tzinfo=None)
+            timeSLT = ts - self._minute_bars.index[-1] - timedelta(minutes=1)  # time since last bar closed
+            if timeSLT > timedelta(minutes=5):
+                lgr.warning("It has been {} day(s), {:.0f} hour(s), and {:.0f} minute(s) since the last close on record!".
+                            format(timeSLT.days, timeSLT.seconds / 3600, timeSLT.seconds % 3600 / 60))
+
+        # Get the number of tick bars to resample
+        tickBarCnt = 0
+        tickBarCnt1 = interval * max_bars
+        tickBarCnt2 = 0
+        if max_time_span > 0:
+            # Get the reference point in time that is max_time_span back since last tick
+            timePast = self._ticks.iloc[-1].Datetime - timedelta(seconds=max_time_span)
+            # Get the number of ticks since timePast
+            tickBarCnt2 = (self._ticks.Datetime > timePast).sum()
+            # Reduce count to a divisible value of interval
+            tickBarCnt2 = tickBarCnt2 // interval * interval
+
+        # Select the lowest tick bar count between time and max_bars based
+        if tickBarCnt1 == 0:
+            tickBarCnt = tickBarCnt2
+        elif tickBarCnt2 == 0:
+            tickBarCnt = tickBarCnt1
+        elif tickBarCnt1 < tickBarCnt2:
+            tickBarCnt = tickBarCnt1
+        else:
+            tickBarCnt = tickBarCnt2
+
+
+        # Re-sample tick bars into N tick bars
+        toResample = self._ticks.tail(tickBarCnt).copy()
+        binCnt = len(toResample) // interval
+        assert binCnt > 0, "interval={} is too high for given max parameters, bars={}, time_span={}".\
+            format(interval, max_bars, max_time_span)
+        toResample['bins'] = pdcut(toResample.index, binCnt)
+        toResample = toResample.groupby('bins')
+        resampled = DataFrame()
+        resampled['Datetime'] = toResample.first().Datetime
+        resampled['Open']     = toResample.first().Last
+        resampled['High']     = toResample.max().Last
+        resampled['Low']      = toResample.min().Last
+        resampled['Close']    = toResample.last().Last
+        rem_labels = ['UpVol', 'DownVol', 'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks']
+        resampled[rem_labels] = toResample.sum().loc[:, rem_labels]
+        # resampled['Count']    = toResample.count().Datetime
+
+        # Reindex to a simple range
+        resampled.index = range(len(resampled))
+
+        # Return values as either DataFrame or numpy array
+        if as_dataframe:
+            return resampled
+        else:
+            resampled.insert(0, 'Time', [x.time() for x in resampled.Datetime])
+            resampled.insert(0, 'Date', [x.date() for x in resampled.Datetime])
+            return resampled.drop('Datetime', axis=1).values
+
     def get_minute_bars(self, count: int, as_dataframe: bool=False):
         """
         Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
@@ -321,11 +404,11 @@ class Simulator(object):
             to_send.insert(0, 'Date', [x.date() for x in to_send.index])
             return to_send.values
 
-    def get_n_minute_bars(self, interval: int, count: int, as_dataframe: bool=False):
+    def get_n_minute_bars(self, count: int, interval: int=1, as_dataframe: bool=False):
         """
         Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
         """
-        lgr.debug("Getting {} minute bars. count={}".format(interval, count))
+        lgr.debug("Getting {}-minute bars. count={}".format(interval, count))
 
         # todo: consider checking whether request covers more time than we have, then downloading data or notifying user
         minuteBarCount = interval * (count+1)
@@ -347,15 +430,15 @@ class Simulator(object):
                             format(timeSLT.days, timeSLT.seconds / 3600, timeSLT.seconds % 3600 / 60))
 
         # Re-sample minute bars into N minute bars
-        toMinutes = self._minute_bars.iloc[-minuteBarCount:]
+        toResample = self._minute_bars.iloc[-minuteBarCount:]
         resampled = DataFrame()
-        resampled['Bars']  = toMinutes.Open.resample('%sT' % interval).count()
-        resampled['Open']  = toMinutes.Open.resample('%sT' % interval).first()
-        resampled['High']  = toMinutes.High.resample('%sT' % interval).max()
-        resampled['Low']   = toMinutes.Low.resample('%sT' % interval).min()
-        resampled['Close'] = toMinutes.Close.resample('%sT' % interval).last()
+        resampled['Bars']  = toResample.Open.resample('%sT' % interval).count()
+        resampled['Open']  = toResample.Open.resample('%sT' % interval).first()
+        resampled['High']  = toResample.High.resample('%sT' % interval).max()
+        resampled['Low']   = toResample.Low.resample('%sT' % interval).min()
+        resampled['Close'] = toResample.Close.resample('%sT' % interval).last()
         rem_labels = ['UpVol', 'DownVol', 'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks']
-        resampled[rem_labels] = toMinutes.loc[:, rem_labels].resample('%sT' % interval).sum()
+        resampled[rem_labels] = toResample.loc[:, rem_labels].resample('%sT' % interval).sum()
 
         # Resample minute bars to 15 minutes in order to remove empty areas
         min15 = resampled.resample('15T').first()
