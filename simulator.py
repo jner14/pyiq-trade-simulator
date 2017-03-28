@@ -25,6 +25,7 @@ LISTEN_LABELS = ['Symbol', 'Last', 'Bid', 'Ask', 'Tick', 'Size', 'Datetime', 'Op
 UPDATES_LABELS = ['Symbol', 'Last', 'Bid', 'Ask', 'Size', 'Datetime', 'Open', 'High', 'Low',
                   'Close', 'UpVol', 'DownVol', 'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks']
 TICK_LABELS = ['Datetime', 'Last', 'Bid', 'Ask', 'UpVol', 'DownVol', 'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks']
+QUOTE_CONN_FIELDS = ['Symbol', 'Last', 'Bid', 'Ask', 'Tick', 'Last Size', 'Last Time']
 mplStyle.use('dark_background')
 lgr = logging.getLogger('simulator')
 lgr.setLevel(logging.DEBUG)
@@ -46,6 +47,7 @@ class HandyListener(iq.VerboseQuoteListener):
         self._lock = lock
         self.queue = queue
         self.output_type = output_type  # 'queue', 'console'
+        self._tick = Series(index=UPDATES_LABELS)
         # self.lgr = logging.getLogger("HandyListener")
         # self.lgr.setLevel(logging.DEBUG)
         # fh2 = logging.FileHandler("simulator_iqfeed_updates.log")
@@ -55,14 +57,13 @@ class HandyListener(iq.VerboseQuoteListener):
 
     def process_update(self, update: np.array) -> None:
         assert len(update) == 1, "Received multiple updates. This is unexpected."
-        update = update[0]
-        data = Series(list(update) + [0] * 10, index=LISTEN_LABELS)
+        data = Series(list(update[0]) + [0] * 10, index=LISTEN_LABELS)
 
         # If trade occurs at ask, then add volume to UpVolume
-        if data.Last == data.Ask:
+        if data.Last >= data.Ask:
             data.UpVol += data.Size
         # If trade occurs at bid, then add volume to DownVolume
-        elif data.Last == data.Bid:
+        elif data.Last <= data.Bid:
             data.DownVol -= data.Size
 
         # If Tick direction is 1, add to UpTicks
@@ -83,6 +84,23 @@ class HandyListener(iq.VerboseQuoteListener):
         date = datetime.now(TIMEZONE).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
         data.Datetime = date + timedelta(microseconds=int(data.Datetime))
 
+        # If this is an new tick, add previous tick to queue and start new tick
+        if data.Tick != 0:
+
+            # Place tick in queue for retrieval from simulator
+            if self._tick.isnull().sum() == 0:
+                with self._lock:
+                    i = 0 if len(self.queue) == 0 else self.queue.index[-1] + 1
+                    self.queue.loc[i] = self._tick
+
+            self._tick = data.loc[UPDATES_LABELS]
+
+        # If this is not a new tick, add volume to current tick
+        else:
+            self._tick.UpVol += data.UpVol
+            self._tick.DownVol += data.DownVol
+            self._tick.TotalVol += data.TotalVol
+
         # Add update data to debug output
         # t1 = data.Datetime.strftime(TIME_DATE_FORMAT)
         # debug_labels = UPDATES_LABELS.copy()
@@ -90,15 +108,8 @@ class HandyListener(iq.VerboseQuoteListener):
         # update_debug_str = "{}, {}, {}".format(t1, data.loc[debug_labels].values, update[6])
         # self.lgr.debug("qsize: {}, update: {}".format(len(self.queue), update_debug_str))
 
-        # Place update data in queue for retrieval from simulator
-        # self.queue.put(data.loc[UPDATES_LABELS])
-        with self._lock:
-            i = 0 if len(self.queue) == 0 else self.queue.index[-1] + 1
-            self.queue.loc[i] = data.loc[UPDATES_LABELS]
-
 
 class Simulator(object):
-    QUOTE_CONN_FIELDS = ['Symbol', 'Last', 'Bid', 'Ask', 'Tick', 'Last Size', 'Last Time']
     MINUTE_LABELS = ['Open', 'High', 'Low', 'Close', 'UpVol', 'DownVol',
                      'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks']
     MARKET_OPEN = time(hour=8)
@@ -106,16 +117,14 @@ class Simulator(object):
 
     def __init__(self,
                  ticker: str,
-                 period: int,
                  stop: float,
                  target: float,
-                 signal_funcs,
-                 bar_cnt: int,
+                 signal_funcs=None,
+                 bar_cnt: int=None,
                  days_back: int=1,
                  backtest: bool=False,
                  offline: bool=False):
         self.ticker = ticker
-        self.period = period
         self.stop = stop
         self.target = target
         self.signal_funcs = signal_funcs
@@ -171,6 +180,8 @@ class Simulator(object):
             while not self._ticksDownloaded:
                 lgr.info("Downloading tick data...")
                 sleep(5)
+                if not self.thread.is_alive():
+                    sys.exit("Failed to download tick data!")
 
             # If we are appending tick data, filter out duplicate values
             ts = datetime.now()
@@ -210,7 +221,7 @@ class Simulator(object):
                 lgr.critical(e)
                 sys.exit()
 
-            self._quote_conn.select_update_fieldnames(Simulator.QUOTE_CONN_FIELDS)
+            self._quote_conn.select_update_fieldnames(QUOTE_CONN_FIELDS)
             self._quote_conn.timestamp_off()
             self._quote_conn.trades_watch(self.ticker)
             self._watching = True
@@ -291,66 +302,72 @@ class Simulator(object):
     def get_final_signal(self, signals):
         return self._final_signal_func(signals)
 
-    def get_tick_bars(self, interval: int=1, max_bars: int=0, max_time_span: int=0, as_dataframe: bool=False):
+    def get_tick_bars(self, period: int=5, count: int=0, time_seconds: int=0, as_dataframe: bool=False):
         """
-        interval:       int=1,      the interval of tick bars returned
-        max_bars:       int=0,      the number of tick bars returned
-        max_time_span:  int=0,      the max time span from last tick of tick bars in seconds returned
-        as_dataframe:   bool=False, whether a pandas DataFrame should be returned instead of a numpy array
+        period:       int=5,      the period of tick count returned
+        count:         int=0,      the number of tick count returned
+        time_seconds: int=0,      the time span from last tick of tick count in seconds returned
+        as_dataframe: bool=False, whether a pandas DataFrame should be returned instead of a numpy array
 
-        *Note: both of max_bars and max_time_span can be passed, but the shorter of the two will be returned
+        *Note: both of count and time_seconds can be passed, but the shorter of the two will be returned
 
         Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
         """
 
-        lgr.debug("Getting {}-tick bars. max_bars={}, max_time_span={}".format(interval, max_bars, max_time_span))
+        lgr.debug("Getting {}-tick count. count={}, time_seconds={}".format(period, count, time_seconds))
 
-        # assert both max_bars and max_time_span are not zero
-        assert (max_bars != 0 or max_time_span != 0), "must pass non-zero value for either max_bars or max_time_span"
+        # assert both count and time_seconds are not zero because one or both must be passed
+        assert (count != 0 or time_seconds != 0), "must pass non-zero value for either count or time_seconds"
 
-        # assert paramaters passed are not less than zero
-        assert (max_bars >= 0 and max_time_span >= 0 and interval >= 0), "must pass positive values"
+        # assert parameters passed are not less than zero
+        assert (count >= 0 and time_seconds >= 0 and period >= 0), "must pass positive values"
 
         # todo: consider implementing backtesting with ticks
         assert not self.backtest, "backtesting is not implemented for get_tick_bars"
 
-        # Update minute bars and warn if there is a gap in minutes which could indicate feed issues
+        # Update minute count and warn if there is a gap in minutes which could indicate feed issues
         if not self.offline:
+
             self._update_minute_bars()
             ts = datetime.now(TIMEZONE).replace(tzinfo=None)
             timeSLT = ts - self._minute_bars.index[-1] - timedelta(minutes=1)  # time since last bar closed
+
             if timeSLT > timedelta(minutes=5):
                 lgr.warning("It has been {} day(s), {:.0f} hour(s), and {:.0f} minute(s) since the last close on record!".
                             format(timeSLT.days, timeSLT.seconds / 3600, timeSLT.seconds % 3600 / 60))
 
-        # Get the number of tick bars to resample
-        tickBarCnt = 0
-        tickBarCnt1 = interval * max_bars
+        # Get the number of tick count to resample
+        tickBarCnt1 = period * count
         tickBarCnt2 = 0
-        if max_time_span > 0:
-            # Get the reference point in time that is max_time_span back since last tick
-            timePast = self._ticks.iloc[-1].Datetime - timedelta(seconds=max_time_span)
+
+        if time_seconds > 0:
+
+            # Get the reference point in time that is time_seconds back since last tick
+            timePast = self._ticks.iloc[-1].Datetime - timedelta(seconds=time_seconds)
+
             # Get the number of ticks since timePast
             tickBarCnt2 = (self._ticks.Datetime > timePast).sum()
-            # Reduce count to a divisible value of interval
-            tickBarCnt2 = tickBarCnt2 // interval * interval
 
-        # Select the lowest tick bar count between time and max_bars based
+            # Reduce count to a divisible value of period
+            tickBarCnt2 = tickBarCnt2 // period * period
+
+        # Select the lowest tick bar count between time and count based
         if tickBarCnt1 == 0:
             tickBarCnt = tickBarCnt2
         elif tickBarCnt2 == 0:
             tickBarCnt = tickBarCnt1
         elif tickBarCnt1 < tickBarCnt2:
             tickBarCnt = tickBarCnt1
-        else:
+        elif tickBarCnt1 > tickBarCnt2:
             tickBarCnt = tickBarCnt2
+        else:
+            tickBarCnt = 0
 
-
-        # Re-sample tick bars into N tick bars
+        # Re-sample tick count into N tick count
         toResample = self._ticks.tail(tickBarCnt).copy()
-        binCnt = len(toResample) // interval
-        assert binCnt > 0, "interval={} is too high for given max parameters, bars={}, time_span={}".\
-            format(interval, max_bars, max_time_span)
+        binCnt = len(toResample) // period
+        assert binCnt > 0, "period={} is too high for given max parameters, count={}, time_span={}".\
+            format(period, count, time_seconds)
         toResample['bins'] = pdcut(toResample.index, binCnt)
         toResample = toResample.groupby('bins')
         resampled = DataFrame()
@@ -367,6 +384,7 @@ class Simulator(object):
         resampled.index = range(len(resampled))
 
         # Return values as either DataFrame or numpy array
+        # Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
         if as_dataframe:
             return resampled
         else:
@@ -374,44 +392,111 @@ class Simulator(object):
             resampled.insert(0, 'Date', [x.date() for x in resampled.Datetime])
             return resampled.drop('Datetime', axis=1).values
 
-    def get_minute_bars(self, count: int, as_dataframe: bool=False):
+    def get_ticks(self, count: int=0, time_seconds: int=0, as_dataframe: bool=False):
         """
-        Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
-        """
-        lgr.debug("Getting minute bars. count={}".format(count))
-        if self.backtest:
-            # if self.charting_enabled:
-            #     self._update_chart()
-            if len(self._minute_bars) < count:
-                for _ in range(count - len(self._minute_bars)):
-                    self.wait_next_bar()
+        count:        int=0,      the number of count returned
+        time_seconds: int=0,      the max time span in seconds returned
+        as_dataframe: bool=False, whether a pandas DataFrame should be returned instead of a numpy array
 
+        *Note: both of count and time_seconds can be passed, but the shorter of the two will be returned
+
+        Returns: npArray[Date, Time, Last, Bid, Ask, Direction, UpVol, DownVol, TotalVol]
+        """
+
+        lgr.debug("Getting tick bars. max_bars={}, time_seconds={}".format(count, time_seconds))
+
+        # assert both max_bars and time_seconds are not zero
+        assert (count != 0 or time_seconds != 0), "must pass non-zero value for either max_bars or time_seconds"
+
+        # assert parameters passed are not less than zero
+        assert (count >= 0 and time_seconds >= 0), "must pass positive values"
+
+        # todo: consider implementing backtesting with count
+        assert not self.backtest, "backtesting is not implemented for get_tick_bars"
+
+        # Update minute bars and warn if there is a gap in minutes which could indicate feed issues
         if not self.offline:
             self._update_minute_bars()
             ts = datetime.now(TIMEZONE).replace(tzinfo=None)
             timeSLT = ts - self._minute_bars.index[-1] - timedelta(minutes=1)  # time since last bar closed
             if timeSLT > timedelta(minutes=5):
-                lgr.warning("It has been {} day(s), {:.0f} hour(s), and {:.0f} minute(s) since the last close on record!".
+                lgr.warning("It's been {} day(s), {:.0f} hour(s), and {:.0f} minute(s) since the last close on record!".
                             format(timeSLT.days, timeSLT.seconds / 3600, timeSLT.seconds % 3600 / 60))
 
-        if as_dataframe:
-            return self._minute_bars.tail(count).copy()
-        else:
-            to_send = self._minute_bars.tail(count).copy()
-            # to_send.insert(0, 'Time', [datetime.strftime(x, TIME_FORMAT) for x in to_send.index])
-            # to_send.insert(0, 'Date', [datetime.strftime(x, DATE_FORMAT) for x in to_send.index])
-            to_send.insert(0, 'Time', [x.time() for x in to_send.index])
-            to_send.insert(0, 'Date', [x.date() for x in to_send.index])
-            return to_send.values
+        # Get the number of tick bars to resample
+        tickBarCnt1 = count
+        tickBarCnt2 = 0
+        if time_seconds > 0:
+            # Get the reference point in time that is time_seconds back since last tick
+            timePast = self._ticks.iloc[-1].Datetime - timedelta(seconds=time_seconds)
+            # Get the number of count since timePast
+            tickBarCnt2 = (self._ticks.Datetime > timePast).sum()
 
-    def get_n_minute_bars(self, count: int, interval: int=1, as_dataframe: bool=False):
+        # Select the lowest tick bar count between time_seconds and max_bars based
+        if tickBarCnt1 == 0:
+            tickBarCnt = tickBarCnt2
+        elif tickBarCnt2 == 0:
+            tickBarCnt = tickBarCnt1
+        elif tickBarCnt1 < tickBarCnt2:
+            tickBarCnt = tickBarCnt1
+        elif tickBarCnt1 > tickBarCnt2:
+            tickBarCnt = tickBarCnt2
+        else:
+            tickBarCnt = 0
+
+        count = self._ticks.tail(tickBarCnt).copy()
+        count.insert(4, 'Direction', count.UpTicks + count.DownTicks)
+        count.drop(['UpTicks', 'DownTicks', 'TotalTicks'], axis=1, inplace=True)
+
+        # Reindex to a simple range
+        count.index = range(len(count))
+
+        # Return values as either DataFrame or numpy array
+        if as_dataframe:
+            return count
+        else:
+            count.insert(0, 'Time', [x.time() for x in count.Datetime])
+            count.insert(0, 'Date', [x.date() for x in count.Datetime])
+            return count.drop('Datetime', axis=1).values
+
+    # def get_minute_bars(self, count: int, as_dataframe: bool=False):
+    #     """
+    #     Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
+    #     """
+    #     lgr.debug("Getting minute bars. count={}".format(count))
+    #     if self.backtest:
+    #         # if self.charting_enabled:
+    #         #     self._update_chart()
+    #         if len(self._minute_bars) < count:
+    #             for _ in range(count - len(self._minute_bars)):
+    #                 self.wait_next_bar()
+    #
+    #     if not self.offline:
+    #         self._update_minute_bars()
+    #         ts = datetime.now(TIMEZONE).replace(tzinfo=None)
+    #         timeSLT = ts - self._minute_bars.index[-1] - timedelta(minutes=1)  # time since last bar closed
+    #         if timeSLT > timedelta(minutes=5):
+    #             lgr.warning("It's been {} day(s), {:.0f} hour(s), and {:.0f} minute(s) since the last close on record!".
+    #                         format(timeSLT.days, timeSLT.seconds / 3600, timeSLT.seconds % 3600 / 60))
+    #
+    #     if as_dataframe:
+    #         return self._minute_bars.tail(count).copy()
+    #     else:
+    #         to_send = self._minute_bars.tail(count).copy()
+    #         # to_send.insert(0, 'Time', [datetime.strftime(x, TIME_FORMAT) for x in to_send.index])
+    #         # to_send.insert(0, 'Date', [datetime.strftime(x, DATE_FORMAT) for x in to_send.index])
+    #         to_send.insert(0, 'Time', [x.time() for x in to_send.index])
+    #         to_send.insert(0, 'Date', [x.date() for x in to_send.index])
+    #         return to_send.values
+
+    def get_minute_bars(self, count: int, period: int=1, as_dataframe: bool=False):
         """
         Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
         """
-        lgr.debug("Getting {}-minute bars. count={}".format(interval, count))
+        lgr.debug("Getting {}-minute bars. count={}".format(period, count))
 
         # todo: consider checking whether request covers more time than we have, then downloading data or notifying user
-        minuteBarCount = interval * (count+1)
+        minuteBarCount = period * (count + 1)
 
         # If backtesting check for and then wait if there are not enough bars available
         if self.backtest:
@@ -426,19 +511,19 @@ class Simulator(object):
             ts = datetime.now(TIMEZONE).replace(tzinfo=None)
             timeSLT = ts - self._minute_bars.index[-1] - timedelta(minutes=1)  # time since last bar closed
             if timeSLT > timedelta(minutes=5):
-                lgr.warning("It has been {} day(s), {:.0f} hour(s), and {:.0f} minute(s) since the last close on record!".
+                lgr.warning("It's been {} day(s), {:.0f} hour(s), and {:.0f} minute(s) since the last close on record!".
                             format(timeSLT.days, timeSLT.seconds / 3600, timeSLT.seconds % 3600 / 60))
 
         # Re-sample minute bars into N minute bars
         toResample = self._minute_bars.iloc[-minuteBarCount:]
         resampled = DataFrame()
-        resampled['Bars']  = toResample.Open.resample('%sT' % interval).count()
-        resampled['Open']  = toResample.Open.resample('%sT' % interval).first()
-        resampled['High']  = toResample.High.resample('%sT' % interval).max()
-        resampled['Low']   = toResample.Low.resample('%sT' % interval).min()
-        resampled['Close'] = toResample.Close.resample('%sT' % interval).last()
+        resampled['Bars']  = toResample.Open.resample('%sT' % period).count()
+        resampled['Open']  = toResample.Open.resample('%sT' % period).first()
+        resampled['High']  = toResample.High.resample('%sT' % period).max()
+        resampled['Low']   = toResample.Low.resample('%sT' % period).min()
+        resampled['Close'] = toResample.Close.resample('%sT' % period).last()
         rem_labels = ['UpVol', 'DownVol', 'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks']
-        resampled[rem_labels] = toResample.loc[:, rem_labels].resample('%sT' % interval).sum()
+        resampled[rem_labels] = toResample.loc[:, rem_labels].resample('%sT' % period).sum()
 
         # Resample minute bars to 15 minutes in order to remove empty areas
         min15 = resampled.resample('15T').first()
@@ -447,7 +532,7 @@ class Simulator(object):
         # Append a row to mask that matches last minute bar of resampled in prep for upsampling
         nanMask1.loc[resampled.index[-1]] = nanMask1.iloc[-1]
         # Upsample the mask to minutes and fill values forward
-        nanMask1 = nanMask1.resample('%sT' % interval).ffill()
+        nanMask1 = nanMask1.resample('%sT' % period).ffill()
         # Filter mask to only include rows in resampled
         nanMask1 = nanMask1.loc[resampled.index[0]:, ]
         # Filter minute bars by mask, keeping only those that have activity within fifteen minute time span
@@ -463,7 +548,7 @@ class Simulator(object):
 
         # Extract only full bars
         # todo: consider not filtering out partial 30 or 60 minute intervals during close since they won't have enough
-        resampled = resampled.loc[resampled.Bars == interval, Simulator.MINUTE_LABELS].tail(count)
+        resampled = resampled.loc[resampled.Bars == period, Simulator.MINUTE_LABELS].tail(count)
 
         # Return values as either DataFrame or numpy array
         if as_dataframe:
@@ -840,41 +925,41 @@ class Simulator(object):
         if self._minute_bars is not None:
             if not self.backtest:
                 # self.minutes.Datetime = self.minutes.Datetime.apply(lambda x: datetime.strftime(x, TIME_DATE_FORMAT))
-                self._minute_bars.to_csv("{}_{}_bars.csv".format(self.ticker, self.period))
-                lgr.debug("Saved minute data to {}_{}_bars.csv".format(self.ticker, self.period))
+                self._minute_bars.to_csv("{}_minute_bars.csv".format(self.ticker))
+                lgr.debug("Saved minute data to {}_minute_bars.csv".format(self.ticker))
         else:
-            lgr.error("Failed to save {}_{}_bars.csv, value=None".format(self.ticker, self.period))
+            lgr.error("Failed to save {}_minute_bars.csv, value=None".format(self.ticker))
         # print("finished.")
 
     def load_minute_data(self):
         try:
             if self.backtest:
-                self._bt_minutes = read_csv("{}_{}_bars.csv".format(self.ticker, self.period), index_col=0,
+                self._bt_minutes = read_csv("{}_minute_bars.csv".format(self.ticker), index_col=0,
                                             parse_dates=True)
             else:
-                self._minute_bars = read_csv("{}_{}_bars.csv".format(self.ticker, self.period), index_col=0,
+                self._minute_bars = read_csv("{}_minute_bars.csv".format(self.ticker), index_col=0,
                                              parse_dates=True)
-            lgr.info("Loaded {}_{}_bars.csv".format(self.ticker, self.period))
+            lgr.info("Loaded {}_minute_bars.csv".format(self.ticker))
         except Exception as e:
-            lgr.error("Failed to load {}_{}_bars.csv! {} ".format(self.ticker, self.period, e.args))
+            lgr.error("Failed to load {}_minute_bars.csv! {} ".format(self.ticker, e.args))
 
     def save_trades(self):
         if self.trades is not None:
             if self.backtest:
-                self.trades.to_csv("{}_{}_backtest_trades.csv".format(self.ticker, self.period))
+                self.trades.to_csv("{}_backtest_trades.csv".format(self.ticker))
             else:
-                self.trades.to_csv("{}_{}_trades.csv".format(self.ticker, self.period))
+                self.trades.to_csv("{}_trades.csv".format(self.ticker))
         else:
-            lgr.error("Failed to {}_{}_trades.csv: value is None ".format(self.ticker, self.period))
+            lgr.error("Failed to {}_trades.csv: value is None ".format(self.ticker))
 
     def load_trades(self):
         if not self.backtest:
             try:
-                self.trades = read_csv("{}_{}_trades.csv".format(self.ticker, self.period), index_col=0,
+                self.trades = read_csv("{}_trades.csv".format(self.ticker), index_col=0,
                                        parse_dates=True)
-                lgr.info("Loaded previous trades from {}_{}_trades.csv".format(self.ticker, self.period))
+                lgr.info("Loaded previous trades from {}_trades.csv".format(self.ticker))
             except Exception as e:
-                lgr.error("Failed to read {}_{}_trades.csv! {} ".format(self.ticker, self.period, e.args))
+                lgr.error("Failed to read {}_trades.csv! {} ".format(self.ticker, e.args))
 
     def _download_missing(self, max_days: int=1):
         if self.offline:
@@ -916,42 +1001,55 @@ class Simulator(object):
         hist_listener = iq.VerboseIQFeedListener("History Tick Listener")
         hist_conn.add_listener(hist_listener)
 
-        with iq.ConnConnector([hist_conn]) as connector:
+        tick_data = None
+        with iq.ConnConnector([hist_conn]) as conn:
             try:
-                # Get all ticks between start time and end time
-                tick_data = hist_conn.request_ticks_in_period(ticker=self.ticker,
-                                                              bgn_prd=start,
-                                                              end_prd=end)
-
-                # Generate fields for [up ticks, down ticks, total ticks, up volume, down volume, and total volume]
-                lgr.info("Downloaded %s ticks. Calculating volume and tick data..." % len(tick_data))
-                df = DataFrame(np.flipud(tick_data))
-                df.drop(['cond1', 'cond2', 'cond3', 'cond4', 'mkt_ctr', 'last_type', 'tick_id', 'tot_vlm'], axis=1, inplace=True)
-                df.columns = ['date', 'time', 'Last', 'Size', 'Bid', 'Ask']
-                df['prev'] = [0] * len(df)
-                df.loc[1:, 'prev'] = list(df.iloc[:-1]['Last'])
-                df.loc[:, 'change'] = df['Last'] - df['prev']
-                df['UpVol'] = [0] * len(df)
-                df['DownVol'] = [0] * len(df)
-                df.loc[:, 'UpVol'] = df.Size.astype(dtype='int') * ((df['Last'] == df.Ask) & (df.Bid != df.Ask))
-                df.loc[:, 'DownVol'] = -1 * df.Size.astype(dtype='int') * ((df['Last'] == df.Bid) & (df.Bid != df.Ask))
-                df.loc[:, 'TotalVol'] = df.UpVol + df.DownVol.abs()
-                df['UpTicks'] = [0] * len(df)
-                df['DownTicks'] = [0] * len(df)
-                df.loc[:, 'UpTicks'] = 1 * (df.change > 0)
-                df.loc[:, 'DownTicks'] = -1 * (df.change < 0)
-                df.loc[:, 'TotalTicks'] = df.UpTicks + df.DownTicks.abs()
-                df.insert(0, 'Datetime', df.date + df.time)
-                df.insert(0, 'Symbol', self.ticker)
-                df.drop(['date', 'time', 'prev', 'change'], axis=1, inplace=True)
-                for label in ['Close', 'Low', 'High', 'Open']:
-                    df.insert(2, label, df.Last)
-                lgr.info("Done calculating volume and tick fields.")
-                return df
+                # Get all feed updates between start time and end time
+                tick_data = hist_conn.request_ticks_in_period(ticker=self.ticker, bgn_prd=start, end_prd=end)
 
             except (iq.NoDataError, iq.UnauthorizedError) as err:
                 lgr.critical("No data returned because {}".format(err))
                 sys.exit()
+
+        if tick_data is not None:
+            # Generate fields for [up ticks, down ticks, total ticks, up volume, down volume, and total volume]
+            lgr.info("Downloaded %s quotes. Calculating volume and tick data..." % len(tick_data))
+            df = DataFrame(np.flipud(tick_data))
+            df.drop(['cond1', 'cond2', 'cond3', 'cond4', 'mkt_ctr', 'last_type', 'tick_id', 'tot_vlm'], axis=1, inplace=True)
+            df.columns = ['date', 'time', 'Last', 'Size', 'Bid', 'Ask']
+            df['prev'] = [0] * len(df)
+            df.loc[1:, 'prev'] = list(df.iloc[:-1]['Last'])
+            df.loc[:, 'change'] = df['Last'] - df['prev']
+            df['UpVol'] = [0] * len(df)
+            df['DownVol'] = [0] * len(df)
+            df.loc[:, 'UpVol'] = df.Size.astype(dtype='int') * ((df['Last'] >= df.Ask) & (df.Bid != df.Ask))
+            df.loc[:, 'DownVol'] = -1 * df.Size.astype(dtype='int') * ((df['Last'] <= df.Bid) & (df.Bid != df.Ask))
+            df.loc[:, 'TotalVol'] = df.Size
+            df['UpTicks'] = [0] * len(df)
+            df['DownTicks'] = [0] * len(df)
+            df.loc[:, 'UpTicks'] = 1 * (df.change > 0)
+            df.loc[:, 'DownTicks'] = -1 * (df.change < 0)
+            df.loc[:, 'TotalTicks'] = df.UpTicks + df.DownTicks.abs()
+            df.insert(0, 'Datetime', df.date + df.time)
+            df.insert(0, 'Symbol', self.ticker)
+            df.drop(['date', 'time', 'prev', 'change'], axis=1, inplace=True)
+            for label in ['Close', 'Low', 'High', 'Open']:
+                df.insert(2, label, df.Last)
+            lgr.info("Done calculating volume and tick fields.")
+
+            # Get ticks from trade quotes
+            msk = df.TotalTicks > 0
+            df.loc[msk, 'tID'] = range(len(msk))
+            df.loc[~msk, 'tID'] = np.nan
+            df.tID = df.tID.ffill()
+            groupedTrades = df.groupby('tID', sort=False)
+            ticks = groupedTrades.first()
+            ticks.Size = groupedTrades.Size.sum()
+            ticks.UpVol = groupedTrades.UpVol.sum()
+            ticks.DownVol = groupedTrades.DownVol.sum()
+            ticks.TotalVol = groupedTrades.TotalVol.sum()
+
+            return ticks
 
     @staticmethod
     def _launch_service():

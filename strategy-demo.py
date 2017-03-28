@@ -3,8 +3,17 @@ from random import random
 import argparse
 
 
-def get_signal_a(bars):
-    # bars = npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
+def get_ticks_signal(ticks):
+    # ticks = npArray[Date, Time, Last, Bid, Ask, Direction, UpVol, DownVol, TotalVol]
+    # Process ticks to create a signal
+
+    # Just a random signal generator
+    signal = 1 if random() > .5 else -1
+    return signal
+
+
+def get_tick_bar_signal(tick_bars):
+    # tick_bars = npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
     # Process bars to create a signal
 
     # Just a random signal generator
@@ -12,8 +21,8 @@ def get_signal_a(bars):
     return signal
 
 
-def get_signal_b(bars):
-    # bars = npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
+def get_minute_bars_signal(min_bars):
+    # min_bars = npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
     # Process bars to create a signal
 
     # Just a random signal generator
@@ -22,27 +31,68 @@ def get_signal_b(bars):
 
 
 def example_loop_func(my_sim):
+    """
+    Examples of data retrieval
+    --------------------------
+    
+    50 1-minute bars:
+    minute_bars_1 = my_sim.get_minute_bars(count=50)
+    
+    50 5-minute bars:
+    minute_bars_5 = my_sim.get_minute_bars(count=50, period=5)
+    
+    100 ticks:
+    ticks_by_count = my_sim.get_ticks(count=100)
+    
+    100s of ticks:
+    ticks_by_time = my_sim.get_ticks(time_seconds=100)
+    
+    50 5-tick bars:
+    tick_bars_by_count_5 = my_sim.get_tick_bars(count=50, period=5)
+    
+    300s of 5-tick bars:
+    tick_bars_by_time_5 = my_sim.get_tick_bars(time_seconds=300, period=5)
+    
+    50 1-minute bars as dataframe:
+    minute_bars_as_dataframe = my_sim.get_minute_bars(count=50, as_dataframe=True)
+    
+    100 ticks as dataframe:
+    ticks_as_dataframe = my_sim.get_ticks(count=100, as_dataframe=True)
+    
+    50 5-tick bars as dataframe:
+    tick_bars_as_dataframe = my_sim.get_tick_bars(count=50, period=5, as_dataframe=True) 
+    """
+
     mySignals = {}
 
-    # Grab the most recent number of bars as necessary for signal generation
-    bars = my_sim.get_minute_bars(count=my_sim.bar_cnt)
-    last_close = bars[-1][5]
+    # Retrieve data for signal processing
+    minute_bars = my_sim.get_minute_bars(count=50, period=5)
+    ticks = my_sim.get_ticks(count=100)
+    tick_bars = my_sim.get_tick_bars(time_seconds=300, period=5)
 
-    # Calculate signals based on custom functions
-    for sig_func in my_sim.signal_funcs:
-        mySignals[sig_func.__name__] = sig_func(bars)
+    # Process data and generate signals using custom functions
+    mySignals["minBarSignal"] = get_minute_bars_signal(minute_bars)
+    mySignals["tickSignal"] = get_ticks_signal(ticks)
+    mySignals["tickBarSignal"] = get_tick_bar_signal(tick_bars)
     finalSignal = my_sim.get_final_signal(mySignals)
+
+    last_close = minute_bars[-1][5]
 
     # Simulate order actions
     if finalSignal == 1:
+
         # Limit buy
         filled = my_sim.limit_buy(last_close)
+
         # If limit long was filled, create limit sell
         if filled:
             my_sim.limit_sell(last_close + my_sim.target, last_close - my_sim.stop)
+
     elif finalSignal == -1:
+
         # Limit short
         filled = my_sim.limit_short(last_close)
+
         # If limit short was filled, create limit cover
         if filled:
             my_sim.limit_cover(last_close - my_sim.target, last_close + my_sim.stop)
@@ -52,6 +102,8 @@ def example_loop_func(my_sim):
 
 def example_final_signal_func(signals):
     # Process all signals to create a final signal
+
+    # This simple strategy checks that all signals align as either buy or sell
 
     # Ex. If all signals are positive, return 1 (buy signal)
     if sum(signals.values()) == len(signals):
@@ -74,21 +126,15 @@ if __name__ == "__main__":
 
     # Simulation Parameters
     ticker        = p_args.ticker    # symbol to simulate trades for
-    days_back     = 2                # days of historical data to download if minute_bars.csv is missing
+    days_back     = 1                # days of historical data to download if minute_bars.csv is missing
     stop          = 3 * .25          # tick count * tick value (e.g. $.25 is for s&p emini) .0000005
     target        = 2 * .25          # tick count * tick value
-    signal_funcs  = (get_signal_a,   # function names for generating signals
-                     get_signal_b)
-    bar_cnt       = 30               # how many bars will be passed to signal functions
     backtest      = p_args.backtest  # whether or not to backtest
 
     sim = Simulator(ticker        = ticker,
-                    period        = 60,
                     days_back     = days_back,
                     stop          = stop,
                     target        = target,
-                    signal_funcs  = signal_funcs,
-                    bar_cnt       = bar_cnt,
                     backtest      = p_args.backtest)
 
     # Examples of chart adjustments
@@ -108,7 +154,7 @@ if __name__ == "__main__":
 
     # Default market hours are 8AM - 4PM EST. Times are set using:
     #     sim.set_market_hours(start_hour=int, start_minute=int, end_hour=int, end_minute=int)
-    sim.market_hours_only = True  # Limit feed updates to market hours?
+    sim.market_hours_only = False  # Limit feed updates to market hours?
 
     # Enable or disable charting
     sim.charting_enabled = True
