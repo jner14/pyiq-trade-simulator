@@ -8,7 +8,7 @@ def get_ticks_signal(ticks):
     # Process ticks to create a signal
 
     # Just a random signal generator
-    signal = 1 if random() > .5 else -1
+    signal = 1 if random() > .25 else -1
     return signal
 
 
@@ -17,7 +17,7 @@ def get_tick_bar_signal(tick_bars):
     # Process bars to create a signal
 
     # Just a random signal generator
-    signal = 1 if random() > .5 else -1
+    signal = 1 if random() > .25 else -1
     return signal
 
 
@@ -26,7 +26,16 @@ def get_minute_bars_signal(min_bars):
     # Process bars to create a signal
 
     # Just a random signal generator
-    signal = 1 if random() > .5 else -1
+    signal = 1 if random() > .25 else -1
+    return signal
+
+
+def get_tick_range_bar_signal(tick_range_bars):
+    # tick_range_bars = npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
+    # Process bars to create a signal
+
+    # Just a random signal generator
+    signal = 1 if random() > .25 else -1
     return signal
 
 
@@ -53,6 +62,12 @@ def example_loop_func(my_sim):
     300s of 5-tick bars:
     tick_bars_by_time_5 = my_sim.get_tick_bars(time_seconds=300, period=5)
     
+    50 5-tick range bars for @ESM17 ticks size=.25
+    tick_range_bars = my_sim.get_tick_range_bars(tick_range=5, tick_size=.25, count=50)
+    
+    6000s 5-tick range bars for @ESM17 ticks size=.25
+    tick_range_bars = my_sim.get_tick_range_bars(tick_range=5, tick_size=.25, time_span=6000)
+    
     50 1-minute bars as dataframe:
     minute_bars_as_dataframe = my_sim.get_minute_bars(count=50, as_dataframe=True)
     
@@ -60,7 +75,7 @@ def example_loop_func(my_sim):
     ticks_as_dataframe = my_sim.get_ticks(count=100, as_dataframe=True)
     
     50 5-tick bars as dataframe:
-    tick_bars_as_dataframe = my_sim.get_tick_bars(count=50, period=5, as_dataframe=True) 
+    tick_bars_as_dataframe = my_sim.get_tick_bars(count=50, period=5, as_dataframe=True)
     """
 
     mySignals = {}
@@ -69,11 +84,13 @@ def example_loop_func(my_sim):
     minute_bars = my_sim.get_minute_bars(count=50, period=5)
     ticks = my_sim.get_ticks(count=100)
     tick_bars = my_sim.get_tick_bars(time_seconds=300, period=5)
+    tick_range_bars = my_sim.get_tick_range_bars(tick_range=5, tick_size=.25, count=50)
 
     # Process data and generate signals using custom functions
     mySignals["minBarSignal"] = get_minute_bars_signal(minute_bars)
     mySignals["tickSignal"] = get_ticks_signal(ticks)
     mySignals["tickBarSignal"] = get_tick_bar_signal(tick_bars)
+    mySignals["tickRangeBarSignal"] = get_tick_range_bar_signal(tick_range_bars)
     finalSignal = my_sim.get_final_signal(mySignals)
 
     last_close = minute_bars[-1][5]

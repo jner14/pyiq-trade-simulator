@@ -20,12 +20,19 @@ TIMEZONE = timezone('US/Eastern')
 TIME_DATE_FORMAT = '%Y-%m-%d %H:%M:%S.%f'
 TIME_FORMAT = '%H:%M:%S.%f'
 DATE_FORMAT = '%Y-%m-%d'
+
 LISTEN_LABELS = ['Symbol', 'Last', 'Bid', 'Ask', 'Tick', 'Size', 'Datetime', 'Open', 'Close',
                  'High', 'Low', 'UpTicks', 'DownTicks', 'TotalTicks', 'UpVol', 'DownVol', 'TotalVol']
+
 UPDATES_LABELS = ['Symbol', 'Last', 'Bid', 'Ask', 'Size', 'Datetime', 'Open', 'High', 'Low',
                   'Close', 'UpVol', 'DownVol', 'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks']
+
 TICK_LABELS = ['Datetime', 'Last', 'Bid', 'Ask', 'UpVol', 'DownVol', 'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks']
+
+MINUTE_LABELS = ['Open', 'High', 'Low', 'Close', 'UpVol', 'DownVol', 'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks']
+
 QUOTE_CONN_FIELDS = ['Symbol', 'Last', 'Bid', 'Ask', 'Tick', 'Last Size', 'Last Time']
+
 mplStyle.use('dark_background')
 lgr = logging.getLogger('simulator')
 lgr.setLevel(logging.DEBUG)
@@ -110,8 +117,6 @@ class HandyListener(iq.VerboseQuoteListener):
 
 
 class Simulator(object):
-    MINUTE_LABELS = ['Open', 'High', 'Low', 'Close', 'UpVol', 'DownVol',
-                     'TotalVol', 'UpTicks', 'DownTicks', 'TotalTicks']
     MARKET_OPEN = time(hour=8)
     MARKET_CLOSE = time(hour=16)
 
@@ -138,7 +143,7 @@ class Simulator(object):
         self._queue = DataFrame(columns=UPDATES_LABELS)
         self.market_hours_only = True
         self.trades = DataFrame(columns=['Price', 'Type'])
-        self._minute_bars = DataFrame(columns=Simulator.MINUTE_LABELS)
+        self._minute_bars = DataFrame(columns=MINUTE_LABELS)
         self._ticks = DataFrame(columns=TICK_LABELS)
         self._updates = DataFrame(columns=UPDATES_LABELS)
         self._received_updates = False
@@ -302,19 +307,117 @@ class Simulator(object):
     def get_final_signal(self, signals):
         return self._final_signal_func(signals)
 
-    def get_tick_bars(self, period: int=5, count: int=0, time_seconds: int=0, as_dataframe: bool=False):
+    def get_tick_range_bars(self, tick_range: int, tick_size: int, count: int=0,
+                            time_seconds: int=0, as_dataframe: bool=False):
         """
-        period:       int=5,      the period of tick count returned
-        count:         int=0,      the number of tick count returned
-        time_seconds: int=0,      the time span from last tick of tick count in seconds returned
-        as_dataframe: bool=False, whether a pandas DataFrame should be returned instead of a numpy array
+        tick_range:   int,          the span of ticks for each bar
+        tick_size:    int,          the currency value of one tick, e.g., .25 for S&P e-mini futures
+        count:        int,          the number of bars returned
+        time_seconds: int=0,        the time span in seconds
+        as_dataframe: bool=False,   whether a pandas DataFrame should be returned instead of a numpy array
 
-        *Note: both of count and time_seconds can be passed, but the shorter of the two will be returned
+        *Note: both count and time_seconds can be passed, but the shorter of the two will be returned
 
         Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
         """
 
-        lgr.debug("Getting {}-tick count. count={}, time_seconds={}".format(period, count, time_seconds))
+        lgr.info("Getting {}-tick range bars. count={}, tick_size={}, time_seconds={},".
+                 format(tick_range, count, tick_size, time_seconds))
+
+        # assert both count and time_seconds are not zero because one or both must be passed
+        assert (count != 0 or time_seconds != 0), "must pass non-zero value for either count or time_seconds"
+
+        # assert parameters passed are not less than zero
+        assert (count >= 0 and time_seconds >= 0 and tick_size >= 0 and tick_range >= 0), "must pass positive values"
+
+        # todo: consider implementing backtesting with ticks
+        assert not self.backtest, "backtesting is not implemented for get_tick_bars"
+
+        # Update minute count and warn if there is a gap in minutes which could indicate feed issues
+        if not self.offline:
+
+            self._update_minute_bars()
+            ts = datetime.now(TIMEZONE).replace(tzinfo=None)
+            timeSLT = ts - self._minute_bars.index[-1] - timedelta(minutes=1)  # time since last bar closed
+
+            if timeSLT > timedelta(minutes=5):
+                lgr.warning("It has been {} day(s), {:.0f} hour(s), and {:.0f} minute(s) since the last close on record!".
+                            format(timeSLT.days, timeSLT.seconds / 3600, timeSLT.seconds % 3600 / 60))
+
+        # Get the reference point in time that is time_seconds back since last tick
+        if time_seconds > 0:
+            timePast = self._ticks.iloc[-1].Datetime - timedelta(seconds=time_seconds)
+        else:
+            timePast = self._ticks.iloc[0].Datetime
+
+        bars = DataFrame()  # columns=["Datetime"] + MINUTE_LABELS)
+        ticks = self._ticks
+
+        # Iterate in reverse through ticks building bars along the way
+        span = tick_size * tick_range
+        close = None
+        # open = None
+        # npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
+        for tid in reversed(ticks.index):
+            thisTick = ticks.loc[tid]
+
+            if close is None:
+                close = thisTick.Last
+                upVol, downVol, totalVol, upTicks, downTicks, totalTicks = [0]*6
+
+            elif abs(thisTick.Last - close) >= span:
+                locID = len(bars)
+                bars.loc[locID, 'Datetime'] = thisTick.Datetime
+                bars.loc[locID, 'Open'] = thisTick.Last
+                bars.loc[locID, 'High'] = max(thisTick.Last, close)
+                bars.loc[locID, 'Low'] = min(thisTick.Last, close)
+                bars.loc[locID, 'Close'] = close
+                bars.loc[locID, 'UpVol'] = upVol + thisTick.UpVol
+                bars.loc[locID, 'DownVol'] = downVol + thisTick.DownVol
+                bars.loc[locID, 'TotalVol'] = totalVol + thisTick.TotalVol
+                bars.loc[locID, 'UpTicks'] = upTicks + thisTick.UpTicks
+                bars.loc[locID, 'DownTicks'] = downTicks + thisTick.DownTicks
+                bars.loc[locID, 'TotalTicks'] = totalTicks + thisTick.TotalTicks
+                close = None
+
+                # Break from loop once bar count or time_seconds has been met
+                if len(bars) >= count or timePast > thisTick.Datetime:
+                    break
+
+            else:
+                upVol += thisTick.UpVol
+                downVol += thisTick.DownVol
+                totalVol += thisTick.TotalVol
+                upTicks += thisTick.UpTicks
+                downTicks += thisTick.DownTicks
+                totalTicks += thisTick.TotalTicks
+
+        # Reverse bars so Datetime is ascending
+        bars = bars.iloc[::-1]
+
+        lgr.info("End Tick Bar Range Creation...")
+
+        # Return values as either DataFrame or numpy array
+        if as_dataframe:
+            return bars
+        else:
+            bars.insert(0, 'Time', [x.time() for x in bars.Datetime])
+            bars.insert(0, 'Date', [x.date() for x in bars.Datetime])
+            return bars.drop('Datetime', axis=1).values
+
+    def get_tick_bars(self, period: int=5, count: int=0, time_seconds: int=0, as_dataframe: bool=False):
+        """
+        period:       int=5,      the period of tick bars returned
+        count:        int=0,      the number of bars returned
+        time_seconds: int=0,      the time span beginning from last tick in seconds
+        as_dataframe: bool=False, whether a pandas DataFrame should be returned instead of a numpy array
+
+        *Note: both count and time_seconds can be passed, but the shorter of the two will be returned
+
+        Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
+        """
+
+        lgr.debug("Getting {}-tick bars. count={}, time_seconds={}".format(period, count, time_seconds))
 
         # assert both count and time_seconds are not zero because one or both must be passed
         assert (count != 0 or time_seconds != 0), "must pass non-zero value for either count or time_seconds"
@@ -384,7 +487,6 @@ class Simulator(object):
         resampled.index = range(len(resampled))
 
         # Return values as either DataFrame or numpy array
-        # Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
         if as_dataframe:
             return resampled
         else:
@@ -394,16 +496,16 @@ class Simulator(object):
 
     def get_ticks(self, count: int=0, time_seconds: int=0, as_dataframe: bool=False):
         """
-        count:        int=0,      the number of count returned
+        count:        int=0,      the number of ticks returned
         time_seconds: int=0,      the max time span in seconds returned
         as_dataframe: bool=False, whether a pandas DataFrame should be returned instead of a numpy array
 
-        *Note: both of count and time_seconds can be passed, but the shorter of the two will be returned
+        *Note: both count and time_seconds can be passed, but the shorter of the two will be returned
 
         Returns: npArray[Date, Time, Last, Bid, Ask, Direction, UpVol, DownVol, TotalVol]
         """
 
-        lgr.debug("Getting tick bars. max_bars={}, time_seconds={}".format(count, time_seconds))
+        lgr.debug("Getting tick bars. count={}, time_seconds={}".format(count, time_seconds))
 
         # assert both max_bars and time_seconds are not zero
         assert (count != 0 or time_seconds != 0), "must pass non-zero value for either max_bars or time_seconds"
@@ -548,7 +650,7 @@ class Simulator(object):
 
         # Extract only full bars
         # todo: consider not filtering out partial 30 or 60 minute intervals during close since they won't have enough
-        resampled = resampled.loc[resampled.Bars == period, Simulator.MINUTE_LABELS].tail(count)
+        resampled = resampled.loc[resampled.Bars == period, MINUTE_LABELS].tail(count)
 
         # Return values as either DataFrame or numpy array
         if as_dataframe:
