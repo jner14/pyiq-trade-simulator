@@ -129,6 +129,7 @@ class Simulator(object):
                  days_back: int=1,
                  backtest: bool=False,
                  offline: bool=False):
+        self._rangeBars = {}
         self.ticker = ticker
         self.stop = stop
         self.target = target
@@ -313,15 +314,15 @@ class Simulator(object):
         tick_range:   int,          the span of ticks for each bar
         tick_size:    int,          the currency value of one tick, e.g., .25 for S&P e-mini futures
         count:        int,          the number of bars returned
-        time_seconds: int=0,        the time span in seconds
+        span_seconds: int=0,        the time span in seconds
         as_dataframe: bool=False,   whether a pandas DataFrame should be returned instead of a numpy array
 
-        *Note: both count and time_seconds can be passed, but the shorter of the two will be returned
+        *Note: both count and span_seconds can be passed, but the shorter of the two will be returned
 
         Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
         """
 
-        lgr.info("Getting {}-tick range bars. count={}, tick_size={}, time_seconds={},".
+        lgr.info("Getting {}-tick range bars. count={}, tick_size={}, span_seconds={},".
                  format(tick_range, count, tick_size, span_seconds))
 
         # assert both count and time_seconds are not zero because one or both must be passed
@@ -344,115 +345,49 @@ class Simulator(object):
                 lgr.warning('''It has been {} day(s), {:.0f} hour(s), and {:.0f} minute(s) since the last close on 
                             record!'''.format(timeSLT.days, timeSLT.seconds / 3600, timeSLT.seconds % 3600 / 60))
 
+        # Check if range bars already exist and create them if not
+        if (tick_range, tick_size) not in self._rangeBars.keys():
+            self._update_tick_range_bars(tick_range, tick_size)
+
+        rngBars = self._rangeBars[(tick_range, tick_size)]
+
         # Get the reference point in time that is time_seconds back since last tick
         if span_seconds > 0:
             timePast = self._ticks.iloc[-1].Datetime - timedelta(seconds=span_seconds)
+            spanCnt = (rngBars.index >= timePast).sum()
+            barCnt = max(spanCnt, count)
         else:
-            timePast = 0
+            barCnt = count
 
-        # ticks = self._ticks.copy()
-        # # TODO: use the first tick as a basis point for range, but how do we get a minimum
-        # bins = np.arange(ticks.iloc[0].Last, ticks.Last.max(), tick_size * tick_range)
-        # bIDs = DataFrame()
-        # bIDs['bins'] = pdcut(ticks.Last, bins, labels=range(len(bins)-1))
-        # bIDs['binsShift'] = bIDs.bins.shift()
-        # msk = bIDs.bins != bIDs.binsShift
-        # bIDs.loc[msk, 'bID'] = range(msk.sum())
-        #
-        # ticks['rangeID'] = bIDs
-        # gTicks = ticks.groupby('rangeID')
-        # bars = DataFrame()
-        # bars['Datetime'] = gTicks.Datetime.first()
-        # bars['Open'] = gTicks.Last.first()
-        # bars['High'] = gTicks.Last.max()
-        # bars['Low'] = gTicks.Last.min()
-        # bars['Close'] = gTicks.Last.last()
-        # bars['UpVol'] = gTicks.UpVol.sum()
-        # bars['DownVol'] = gTicks.DownVol.sum()
-        # bars['TotalVol'] = gTicks.TotalVol.sum()
-        # bars['UpTicks'] = gTicks.UpTicks.sum()
-        # bars['DownTicks'] = gTicks.DownTicks.sum()
-        # bars['TotalTicks'] = gTicks.TotalTicks.sum()
-
-        upVol, downVol, totalVol, upTicks, downTicks, totalTicks = [0]*6
-
-        # Get first tick timestamp and use as basis for all tick range bars
-
-        # 45.0, 1.25,
-
-        # Iterate in reverse through ticks building bars along the way
-        span = tick_size * tick_range
-        close = None
-        ticks = DataFrame(columns=['Datetime', 'Open', 'High', 'Low', 'Close', 'UpVol', 'DownVol', 'TotalVol',
-                                   'UpTicks', 'DownTicks', 'TotalTicks'])
-        for tid in reversed(self._ticks.index):
-            thisTick = self._ticks.loc[tid]
-            # Todo: fix issue where range bars are based off of last tick instead of first tick
-            # Todo: fix issue where range bars start and end separated by tick size. Open = prevClose
-            if close is None:
-                close = thisTick.Last
-                upVol, downVol, totalVol, upTicks, downTicks, totalTicks = [0]*6
-
-            elif abs(thisTick.Last - close) >= span:
-                locID = len(ticks)
-                ticks.loc[locID, ['Datetime', 'Open', 'High', 'Low', 'Close', 'UpVol', 'DownVol', 'TotalVol', 'UpTicks',
-                                  'DownTicks', 'TotalTicks']] = [thisTick.Datetime,
-                                                                 thisTick.Last,
-                                                                 max(thisTick.Last, close),
-                                                                 min(thisTick.Last, close),
-                                                                 close,
-                                                                 upVol + thisTick.UpVol,
-                                                                 downVol + thisTick.DownVol,
-                                                                 totalVol + thisTick.TotalVol,
-                                                                 upTicks + thisTick.UpTicks,
-                                                                 downTicks + thisTick.DownTicks,
-                                                                 totalTicks + thisTick.TotalTicks]
-                close = None
-
-                # Break from loop once bar count or time_seconds has been met
-                if (count != 0 and len(ticks) >= count) or (timePast != 0 and timePast > thisTick.Datetime):
-                    break
-
-            else:
-                upVol += thisTick.UpVol
-                downVol += thisTick.DownVol
-                totalVol += thisTick.TotalVol
-                upTicks += thisTick.UpTicks
-                downTicks += thisTick.DownTicks
-                totalTicks += thisTick.TotalTicks
-
-        # Reverse bars so Datetime is ascending
-        ticks = ticks.iloc[::-1]
-
-        lgr.info("End Tick Bar Range Creation...")
+        bars = rngBars.tail(barCnt).copy()
 
         # Return values as either DataFrame or numpy array
         if as_dataframe:
-            return ticks
+            return bars
         else:
-            ticks.insert(0, 'Time', [x.time() for x in ticks.Datetime])
-            ticks.insert(0, 'Date', [x.date() for x in ticks.Datetime])
-            return ticks.drop('Datetime', axis=1).values
+            bars.insert(0, 'Time', [x.time() for x in bars.index])
+            bars.insert(0, 'Date', [x.date() for x in bars.index])
+            return bars.values
 
-    def get_tick_bars(self, period: int=5, count: int=0, time_seconds: int=0, as_dataframe: bool=False):
+    def get_tick_bars(self, period: int=5, count: int=0, span_seconds: int=0, as_dataframe: bool=False):
         """
         period:       int=5,      the period of tick bars returned
         count:        int=0,      the number of bars returned
-        time_seconds: int=0,      the time span beginning from last tick in seconds
+        span_seconds: int=0,      the time span beginning from last tick in seconds
         as_dataframe: bool=False, whether a pandas DataFrame should be returned instead of a numpy array
 
-        *Note: both count and time_seconds can be passed, but the shorter of the two will be returned
+        *Note: both count and span_seconds can be passed, but the shorter of the two will be returned
 
         Returns: npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
         """
 
-        lgr.debug("Getting {}-tick bars. count={}, time_seconds={}".format(period, count, time_seconds))
+        lgr.debug("Getting {}-tick bars. count={}, span_seconds={}".format(period, count, span_seconds))
 
-        # assert both count and time_seconds are not zero because one or both must be passed
-        assert (count != 0 or time_seconds != 0), "must pass non-zero value for either count or time_seconds"
+        # assert both count and span_seconds are not zero because one or both must be passed
+        assert (count != 0 or span_seconds != 0), "must pass non-zero value for either count or span_seconds"
 
         # assert parameters passed are not less than zero
-        assert (count >= 0 and time_seconds >= 0 and period >= 0), "must pass positive values"
+        assert (count >= 0 and span_seconds >= 0 and period >= 0), "must pass positive values"
 
         # todo: consider implementing backtesting with ticks
         assert not self.backtest, "backtesting is not implemented for get_tick_bars"
@@ -472,10 +407,10 @@ class Simulator(object):
         tickBarCnt1 = period * count
         tickBarCnt2 = 0
 
-        if time_seconds > 0:
+        if span_seconds > 0:
 
-            # Get the reference point in time that is time_seconds back since last tick
-            timePast = self._ticks.iloc[-1].Datetime - timedelta(seconds=time_seconds)
+            # Get the reference point in time that is span_seconds back since last tick
+            timePast = self._ticks.iloc[-1].Datetime - timedelta(seconds=span_seconds)
 
             # Get the number of ticks since timePast
             tickBarCnt2 = (self._ticks.Datetime > timePast).sum()
@@ -499,7 +434,7 @@ class Simulator(object):
         toResample = self._ticks.tail(tickBarCnt).copy()
         binCnt = len(toResample) // period
         assert binCnt > 0, "period={} is too high for given max parameters, count={}, time_span={}".\
-            format(period, count, time_seconds)
+            format(period, count, span_seconds)
         toResample['bins'] = pdcut(toResample.index, binCnt)
         toResample = toResample.groupby('bins')
         resampled = DataFrame()
@@ -793,13 +728,18 @@ class Simulator(object):
                 delta = (datetime.now() - st).total_seconds()
                 self._ticks = concat([self._ticks, self._queue.loc[:, TICK_LABELS]], ignore_index=True)
                 self._queue.drop(self._queue.index, axis=0, inplace=True)
+
+            # Update any tick range bars
+            for tickRange, tickSize in self._rangeBars.keys():
+                self._update_tick_range_bars(tickRange, tickSize)
+
             lgr.debug("Received updates. qsize={}, current updates={}, dbUpdated={:.4f}s".format(len(self._queue),
                                                                                                  len(self._updates),
                                                                                                  delta))
         else:
             self._received_updates = False
 
-    # TODO: change wait_next_bar so that it supports multiple periods
+    # todo: consider to change wait_next_bar so that it supports multiple periods
     def wait_next_bar(self, delay=.5):
         if self.backtest:
             # Grab next bar from self.bt_minutes and add to self.minutes
@@ -1329,6 +1269,75 @@ class Simulator(object):
         elif level.lower() == "debug":
             fh.setLevel(logging.DEBUG)
 
+    def _update_tick_range_bars(self, tick_range, tick_size):
+        """Use ticks to make tick range bars"""
+
+        # span is the amount in currency that a bar will cover
+        span = tick_size * tick_range
+
+        # If this isn't the first update for this tick_range then
+        if (tick_range, tick_size) in self._rangeBars.keys():
+            # Get only the latest ticks that haven't been converted to range bars
+            lgr.debug("Adding {}-tick range bars...".format(tick_range))
+            assert len(self._rangeBars[(tick_range, tick_size)]) > 0, \
+                "Range bars should not be empty if it exists for this tick range!"
+            lastRngBar = self._rangeBars[(tick_range, tick_size)].tail(1).squeeze()
+            updateTicks = self._ticks.loc[self._ticks.Datetime >= lastRngBar.name]
+        else:
+            # Otherwise use all ticks
+            lgr.info("Creating {}-tick range bars for the first time. Please wait.".format(tick_range))
+            updateTicks = self._ticks
+
+        # Iterate in reverse through ticks building bars along the way
+        upVol, downVol, totalVol, upTicks, downTicks, totalTicks = [0]*6
+        open_, high, low, dt = [None]*4
+        startNewBar = True
+        bars = DataFrame(columns=MINUTE_LABELS)
+        for tid in updateTicks.index:
+            thisTick = updateTicks.loc[tid]
+
+            # First run, open and high and low = current price
+            if open_ is None:
+                dt = thisTick.Datetime
+                open_, high, low = [thisTick.Last]*3
+            else:
+                # Calculate high and low prices
+                high = max(high, thisTick.Last)
+                low = min(low, thisTick.Last)
+
+            # If the price has reached the span, then create bar
+            if abs(thisTick.Last - open_) >= span:
+                bars.loc[dt, MINUTE_LABELS] = [open_, high, low, thisTick.Last, upVol, downVol,
+                                               totalVol, upTicks, downTicks, totalTicks]
+                dt = thisTick.Datetime
+                open_, high, low = [thisTick.Last]*3
+                upVol, downVol, totalVol, upTicks, downTicks, totalTicks = [0] * 6
+            #     startNewBar = True
+            #
+            # if startNewBar:
+            #     upVol, downVol, totalVol, upTicks, downTicks, totalTicks = [0] * 6
+            #     startNewBar = False
+
+            # Accumulate volume and ticks
+            upVol += thisTick.UpVol
+            downVol += thisTick.DownVol
+            totalVol += thisTick.TotalVol
+            upTicks += thisTick.UpTicks
+            downTicks += thisTick.DownTicks
+            totalTicks += thisTick.TotalTicks
+
+        # If this isn't the first update for this tick_range then
+        if (tick_range, tick_size) in self._rangeBars.keys():
+            # Add only new bars to instance _rangeBars
+            lgr.debug("End tick bar range creation. bars=%s" % str(len(bars)-1))
+            self._rangeBars[(tick_range, tick_size)] = concat([self._rangeBars[(tick_range, tick_size)], bars.iloc[1:]])
+        else:
+            # Add all bars to instance _rangeBars
+            lgr.info("End first tick bar range creation. bars=%s" % str(len(bars)-1))
+            self._rangeBars[(tick_range, tick_size)] = bars
+
+
+
 
 def glimpse(df: DataFrame, size: int=5):
     aGlimpse = None
@@ -1344,7 +1353,7 @@ def rnd(val, n: int=7):
 
 
 if __name__ == "__main__":
-    # TODO: Consider implementing backtesting with trade data not just minute data
+    # todo: consider implementing backtesting with trade data not just minute data
     # For debugging code
     sim1 = Simulator("@JY#")
     while True:

@@ -31,7 +31,7 @@ def get_minute_bars_signal(min_bars):
 
 
 def get_tick_range_bar_signal(tick_range_bars):
-    # tick_range_bars = npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
+    # range_bars = npArray[Date, Time, Open, High, Low, Close, UpVol, DownVol, TotalVol, UpTicks, DownTicks, TotalTicks]
     # Process bars to create a signal
 
     # Just a random signal generator
@@ -83,8 +83,8 @@ def example_loop_func(my_sim):
     # Retrieve data for signal processing
     minute_bars = my_sim.get_minute_bars(count=50, period=5)
     ticks = my_sim.get_ticks(count=100)
-    tick_bars = my_sim.get_tick_bars(time_seconds=300, period=5)
-    tick_range_bars = my_sim.get_tick_range_bars(tick_range=5, tick_size=.25, count=50)
+    tick_bars = my_sim.get_tick_bars(span_seconds=300, period=5)
+    tick_range_bars = my_sim.get_tick_range_bars(tick_range=2, tick_size=.25, count=20)
 
     # Process data and generate signals using custom functions
     mySignals["minBarSignal"] = get_minute_bars_signal(minute_bars)
