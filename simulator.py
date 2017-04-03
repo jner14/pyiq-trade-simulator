@@ -130,7 +130,6 @@ class Simulator(object):
                  backtest: bool=False,
                  offline: bool=False):
         self._rangeBars = {}
-        self._rangeBarsUpdated = False
         self.ticker = ticker
         self.stop = stop
         self.target = target
@@ -154,7 +153,8 @@ class Simulator(object):
         self._trade_listener = None
         lgr.info("Starting new session...\n"+"#"*90+"\n\n"+"#"*90)
         lgr.info("Market hours are set to 8AM - 4PM EST")
-        self.db_con1 = sqlalchemy.create_engine("sqlite:///tick_data.sqlite3")
+        self._ticksConn = sqlalchemy.create_engine("sqlite:///tick_data.sqlite3")
+        self._ticksConn2 = None
         self.load_tick_data()
         self._ticksSaved = False
         self._ticksDownloaded = False
@@ -196,10 +196,12 @@ class Simulator(object):
                 msk2 = self._updates.Datetime > self._ticks.iloc[-1].Datetime
                 # Append downloaded ticks memory and db
                 self._ticks = concat([self._ticks, self._updates.loc[msk2, TICK_LABELS]], ignore_index=True)
-                self._updates.loc[msk2, TICK_LABELS].to_sql(name=self.ticker, con=self.db_con1, if_exists='append', index=False)
+                self._updates.loc[msk2, TICK_LABELS].to_sql(name=self.ticker, con=self._ticksConn, if_exists='append',
+                                                            index=False)
             else:
                 self._ticks = self._updates.loc[:, TICK_LABELS]
-                self._updates.loc[:, TICK_LABELS].to_sql(name=self.ticker, con=self.db_con1, if_exists='append', index=False)
+                self._updates.loc[:, TICK_LABELS].to_sql(name=self.ticker, con=self._ticksConn, if_exists='append',
+                                                         index=False)
 
             lgr.info("Tick data saved, Rows={}, Time={}".format(len(self._updates), datetime.now() - ts))
 
@@ -210,7 +212,8 @@ class Simulator(object):
             self._run()
 
     def _run(self):
-        self.db_con2 = lite.connect("tick_data.sqlite3")
+        self._ticksConn2 = lite.connect("tick_data.sqlite3")
+        self._rangeBarsConn = sqlalchemy.create_engine("sqlite:///tick_range_bars.sqlite3")
 
         if not self.backtest:
             self.wait_market_hours()
@@ -725,7 +728,7 @@ class Simulator(object):
             with self._lock:
                 self._updates = concat([self._updates, self._queue], ignore_index=True)
                 st = datetime.now()
-                self._queue.loc[:, TICK_LABELS].to_sql(name=self.ticker, con=self.db_con2, if_exists='append', index=False)
+                self._queue.loc[:, TICK_LABELS].to_sql(name=self.ticker, con=self._ticksConn2, if_exists='append', index=False)
                 delta = (datetime.now() - st).total_seconds()
                 self._ticks = concat([self._ticks, self._queue.loc[:, TICK_LABELS]], ignore_index=True)
                 self._queue.drop(self._queue.index, axis=0, inplace=True)
@@ -746,13 +749,17 @@ class Simulator(object):
         elif bar_type == 'tick':
             pass
         elif 'tick range' in bar_type:
-            tickRange = bar_type[0]
             assert len(self._rangeBars) > 0, "No range bars are available to monitor in function wait_next_bar!"
+            try:
+                tickRange = int(bar_type[0])
+            except Exception as e:
+                lgr.fatal("bar_type must begin with an integer for a tick range, bar_type={}, e={}".format(bar_type, e))
+                sys.exit()
             ranges, sizes = zip(*self._rangeBars.keys())
             tickSize = sizes[0]
             if tickRange not in ranges:
-                raise ValueError('Invalid range given for function wait_next_bar! Valid=[2-tick range, 3-tick range' +
-                                 ',..., n-tick range]')
+                raise ValueError('Invalid range given for function wait_next_bar({})!'.format(tickRange) +
+                                 'Ranges Available={}'.format(ranges))
         else:
             raise ValueError('Invalid bar_type given for function wait_next_bar! Valid=[minute, tick, n-tick range]')
 
@@ -1026,7 +1033,7 @@ class Simulator(object):
     def load_tick_data(self):
         ts = datetime.now()
         try:
-            self._ticks = read_sql_table(self.ticker, self.db_con1, parse_dates='Datetime')
+            self._ticks = read_sql_table(self.ticker, self._ticksConn, parse_dates='Datetime')
             lgr.info("Loaded tick data, Time={}".format(datetime.now() - ts))
         except Exception as e:
             lgr.error("Failed to load tick data! {}, {}".format(self.ticker, e.args))
@@ -1312,6 +1319,18 @@ class Simulator(object):
     def _update_tick_range_bars(self, tick_range, tick_size):
         """Use ticks to make tick range bars"""
 
+        # Load ticks from db if necessary
+        tableName = "{}_{}_{}".format(self.ticker, tick_range, tick_size)
+
+        # If _rangeBars does not currently include requested bar range, check db
+        if (tick_range, tick_size) not in self._rangeBars.keys():
+            try:
+                self._rangeBars[(tick_range, tick_size)] = read_sql_table(tableName, self._rangeBarsConn,
+                                                                          parse_dates='index',
+                                                                          index_col='index')
+            except Exception as e:
+                lgr.warning("Failed to load {}-tick range bars from db! {}".format(tick_range, e))
+
         # span is the amount in currency that a bar will cover
         span = tick_size * tick_range
 
@@ -1328,10 +1347,10 @@ class Simulator(object):
             lgr.info("Creating {}-tick range bars for the first time. Please wait.".format(tick_range))
             updateTicks = self._ticks
 
-        # Iterate in reverse through ticks building bars along the way
+        # Iterate through ticks building bars along the way
         upVol, downVol, totalVol, upTicks, downTicks, totalTicks = [0]*6
         open_, high, low, dt = [None]*4
-        bars = DataFrame(columns=MINUTE_LABELS)
+        bars = DataFrame(columns=MINUTE_LABELS, dtype=np.float64)
         for tid in updateTicks.index:
             thisTick = updateTicks.loc[tid]
 
@@ -1360,19 +1379,17 @@ class Simulator(object):
             downTicks += thisTick.DownTicks
             totalTicks += thisTick.TotalTicks
 
-        # Check if any bars were created
-        if len(bars) > 1:
-            self._rangeBarsUpdated = True
-
         # If this isn't the first update for this tick_range then
         if (tick_range, tick_size) in self._rangeBars.keys():
             # Add only new bars to instance _rangeBars
             lgr.debug("End tick range bar creation. bars=%s" % str(len(bars)-1))
             self._rangeBars[(tick_range, tick_size)] = concat([self._rangeBars[(tick_range, tick_size)], bars.iloc[1:]])
+            bars.iloc[1:].to_sql(name=tableName, con=self._rangeBarsConn, if_exists='append')
         else:
             # Add all bars to instance _rangeBars
             lgr.info("End initial tick range creation. bars=%s" % str(len(bars)-1))
             self._rangeBars[(tick_range, tick_size)] = bars
+            bars.to_sql(name=tableName, con=self._rangeBarsConn, if_exists='replace')
 
 
 def glimpse(df: DataFrame, size: int=5):

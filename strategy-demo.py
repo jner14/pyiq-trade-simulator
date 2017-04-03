@@ -115,8 +115,9 @@ def example_loop_func(my_sim):
             my_sim.limit_cover(fillPrice - my_sim.target, fillPrice + my_sim.stop)
 
     # Wait until the specified bar type has closed
+    # For this to work with tick range bars, ranges of the same value must have been requested above
     # bar_type=[minute, tick, n-tick range(eg. 2-tick range, 3-tick range, ...)]
-    my_sim.wait_next_bar(bar_type='tick')
+    my_sim.wait_next_bar(bar_type='2-tick range')
 
 
 def example_final_signal_func(signals):
