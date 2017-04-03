@@ -130,6 +130,7 @@ class Simulator(object):
                  backtest: bool=False,
                  offline: bool=False):
         self._rangeBars = {}
+        self._rangeBarsUpdated = False
         self.ticker = ticker
         self.stop = stop
         self.target = target
@@ -739,9 +740,24 @@ class Simulator(object):
         else:
             self._received_updates = False
 
-    # todo: consider to change wait_next_bar so that it supports multiple periods
-    def wait_next_bar(self, delay=.5):
+    def wait_next_bar(self, bar_type='minute', delay=.5):
+        if bar_type == 'minute':
+            pass
+        elif bar_type == 'tick':
+            pass
+        elif 'tick range' in bar_type:
+            tickRange = bar_type[0]
+            assert len(self._rangeBars) > 0, "No range bars are available to monitor in function wait_next_bar!"
+            ranges, sizes = zip(*self._rangeBars.keys())
+            tickSize = sizes[0]
+            if tickRange not in ranges:
+                raise ValueError('Invalid range given for function wait_next_bar! Valid=[2-tick range, 3-tick range' +
+                                 ',..., n-tick range]')
+        else:
+            raise ValueError('Invalid bar_type given for function wait_next_bar! Valid=[minute, tick, n-tick range]')
+
         if self.backtest:
+            assert not self.backtest, "Backtesting functionality has not been updated in wait_next_bar!"
             # Grab next bar from self.bt_minutes and add to self.minutes
             if len(self._bt_minutes) != 0:
                 self._minute_bars = self._minute_bars.append(self._bt_minutes.iloc[0])
@@ -752,20 +768,44 @@ class Simulator(object):
                 lgr.info("Finished backtesting!")
                 sys.exit()
         else:
-            lastBarTime = self._minute_bars.index[-1]
-            endTime = lastBarTime + timedelta(minutes=2)
-            sinceLast = datetime.now()
-            while lastBarTime == self._minute_bars.index[-1]:
-                sleep(delay)
-                self._update_minute_bars()
-                now = datetime.now()
-                if now.second % 5 == 0 and now - sinceLast >= timedelta(seconds=5):
-                    sinceLast = now
-                    currTime = datetime.now(TIMEZONE).replace(tzinfo=None)
-                    to_wait = (endTime - currTime).total_seconds()
-                    lgr.info("Waiting {} seconds for next bar. updates={}, qsize={}".format(round(to_wait),
-                                                                                            len(self._updates),
-                                                                                            len(self._queue)))
+            if bar_type == 'minute':
+                lastBarTime = self._minute_bars.index[-1]
+                endTime = lastBarTime + timedelta(minutes=2)
+                sinceLast = datetime.now()
+                while lastBarTime == self._minute_bars.index[-1]:
+                    sleep(delay)
+                    self._update_minute_bars()
+                    now = datetime.now()
+                    if now.second % 5 == 0 and now - sinceLast >= timedelta(seconds=5):
+                        sinceLast = now
+                        currTime = datetime.now(TIMEZONE).replace(tzinfo=None)
+                        to_wait = (endTime - currTime).total_seconds()
+                        lgr.info("Waiting {} seconds for next bar. updates={}, qsize={}".format(round(to_wait),
+                                                                                                len(self._updates),
+                                                                                                len(self._queue)))
+            elif bar_type == 'tick':
+                lastBarTime = self._ticks.iloc[-1].Datetime
+                sinceLast = datetime.now()
+                while lastBarTime == self._ticks.iloc[-1].Datetime:
+                    sleep(delay)
+                    self._update_minute_bars()
+                    now = datetime.now()
+                    if now.second % 5 == 0 and now - sinceLast >= timedelta(seconds=5):
+                        sinceLast = now
+                        lgr.info("Waiting for next tick. updates={}, qsize={}".format(len(self._updates),
+                                                                                      len(self._queue)))
+            elif 'tick range' in bar_type:
+                lastBarTime = self._rangeBars[(tickRange, tickSize)].index[-1]
+                sinceLast = datetime.now()
+                while lastBarTime == self._rangeBars[(tickRange, tickSize)].index[-1]:
+                    sleep(delay)
+                    self._update_minute_bars()
+                    now = datetime.now()
+                    if now.second % 5 == 0 and now - sinceLast >= timedelta(seconds=5):
+                        sinceLast = now
+                        lgr.info("Waiting for next {}-tick range bar. updates={}, qsize={}".format(tickRange,
+                                                                                                   len(self._updates),
+                                                                                                   len(self._queue)))
 
     def _buy(self, price):
         if self.backtest:
@@ -826,9 +866,9 @@ class Simulator(object):
                 break
 
         if filled:
-            return True
+            return row.Last
         else:
-            return False
+            return 0
 
     def _cover(self, price):
         if self.backtest:
@@ -979,9 +1019,9 @@ class Simulator(object):
                 break
 
         if filled:
-            return True
+            return row.Last
         else:
-            return False
+            return 0
 
     def load_tick_data(self):
         ts = datetime.now()
@@ -1291,7 +1331,6 @@ class Simulator(object):
         # Iterate in reverse through ticks building bars along the way
         upVol, downVol, totalVol, upTicks, downTicks, totalTicks = [0]*6
         open_, high, low, dt = [None]*4
-        startNewBar = True
         bars = DataFrame(columns=MINUTE_LABELS)
         for tid in updateTicks.index:
             thisTick = updateTicks.loc[tid]
@@ -1312,11 +1351,6 @@ class Simulator(object):
                 dt = thisTick.Datetime
                 open_, high, low = [thisTick.Last]*3
                 upVol, downVol, totalVol, upTicks, downTicks, totalTicks = [0] * 6
-            #     startNewBar = True
-            #
-            # if startNewBar:
-            #     upVol, downVol, totalVol, upTicks, downTicks, totalTicks = [0] * 6
-            #     startNewBar = False
 
             # Accumulate volume and ticks
             upVol += thisTick.UpVol
@@ -1326,17 +1360,19 @@ class Simulator(object):
             downTicks += thisTick.DownTicks
             totalTicks += thisTick.TotalTicks
 
+        # Check if any bars were created
+        if len(bars) > 1:
+            self._rangeBarsUpdated = True
+
         # If this isn't the first update for this tick_range then
         if (tick_range, tick_size) in self._rangeBars.keys():
             # Add only new bars to instance _rangeBars
-            lgr.debug("End tick bar range creation. bars=%s" % str(len(bars)-1))
+            lgr.debug("End tick range bar creation. bars=%s" % str(len(bars)-1))
             self._rangeBars[(tick_range, tick_size)] = concat([self._rangeBars[(tick_range, tick_size)], bars.iloc[1:]])
         else:
             # Add all bars to instance _rangeBars
-            lgr.info("End first tick bar range creation. bars=%s" % str(len(bars)-1))
+            lgr.info("End initial tick range creation. bars=%s" % str(len(bars)-1))
             self._rangeBars[(tick_range, tick_size)] = bars
-
-
 
 
 def glimpse(df: DataFrame, size: int=5):

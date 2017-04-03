@@ -8,7 +8,7 @@ def get_ticks_signal(ticks):
     # Process ticks to create a signal
 
     # Just a random signal generator
-    signal = 1 if random() > .25 else -1
+    signal = 1 if random() > .5 else -1
     return signal
 
 
@@ -17,7 +17,7 @@ def get_tick_bar_signal(tick_bars):
     # Process bars to create a signal
 
     # Just a random signal generator
-    signal = 1 if random() > .25 else -1
+    signal = 1 if random() > .5 else -1
     return signal
 
 
@@ -26,7 +26,7 @@ def get_minute_bars_signal(min_bars):
     # Process bars to create a signal
 
     # Just a random signal generator
-    signal = 1 if random() > .25 else -1
+    signal = 1 if random() > .5 else -1
     return signal
 
 
@@ -35,7 +35,7 @@ def get_tick_range_bar_signal(tick_range_bars):
     # Process bars to create a signal
 
     # Just a random signal generator
-    signal = 1 if random() > .25 else -1
+    signal = 1 if random() > .5 else -1
     return signal
 
 
@@ -99,22 +99,24 @@ def example_loop_func(my_sim):
     if finalSignal == 1:
 
         # Limit buy
-        filled = my_sim.limit_buy(last_close)
+        fillPrice = my_sim.limit_buy(last_close)
 
         # If limit long was filled, create limit sell
-        if filled:
-            my_sim.limit_sell(last_close + my_sim.target, last_close - my_sim.stop)
+        if fillPrice > 0:
+            my_sim.limit_sell(fillPrice + my_sim.target, fillPrice - my_sim.stop)
 
     elif finalSignal == -1:
 
         # Limit short
-        filled = my_sim.limit_short(last_close)
+        fillPrice = my_sim.limit_short(last_close)
 
         # If limit short was filled, create limit cover
-        if filled:
-            my_sim.limit_cover(last_close - my_sim.target, last_close + my_sim.stop)
+        if fillPrice > 0:
+            my_sim.limit_cover(fillPrice - my_sim.target, fillPrice + my_sim.stop)
 
-    my_sim.wait_next_bar()
+    # Wait until the specified bar type has closed
+    # bar_type=[minute, tick, n-tick range(eg. 2-tick range, 3-tick range, ...)]
+    my_sim.wait_next_bar(bar_type='tick')
 
 
 def example_final_signal_func(signals):
